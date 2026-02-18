@@ -145,7 +145,8 @@ impl App {
             // Reserve: 2 rows for block borders + 1 row for status bar, 2 cols for borders
             let pty_rows = term_rows.saturating_sub(3);
             let pty_cols = term_cols.saturating_sub(2);
-            match PtySession::spawn("screen", &["-r", &pid_name], pty_rows, pty_cols) {
+            let rc = crate::screen::ensure_screenrc();
+            match PtySession::spawn("screen", &["-c", &rc, "-r", &pid_name], pty_rows, pty_cols) {
                 Ok(pty) => {
                     // Clear shell so prompt starts at top (fixes size
                     // mismatch from sessions created with `screen -dmS`)

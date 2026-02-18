@@ -25,6 +25,7 @@ impl PtySession {
             Command::new(program)
                 .args(args)
                 .env("TERM", "xterm-256color")
+                .env("COLORTERM", "truecolor")
                 .stdin(Stdio::from_raw_fd(slave_raw))
                 .stdout(Stdio::from_raw_fd(dup1))
                 .stderr(Stdio::from_raw_fd(dup2))

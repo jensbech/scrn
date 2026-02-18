@@ -67,6 +67,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     }
 
+    // Verify GNU Screen version before starting
+    if let Err(e) = screen::check_version() {
+        eprintln!("scrn: {e}");
+        std::process::exit(1);
+    }
+
     // Parse --action-file flag
     let mut action_file = None;
     let mut i = 1;
