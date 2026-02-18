@@ -1,0 +1,810 @@
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState};
+use ratatui::Frame;
+
+use crate::app::{fuzzy_match, App, Mode};
+use crate::screen::SessionState;
+
+// ── Palette — ALL explicit Rgb, zero ANSI named colors ─────
+const BASE_BG: Color = Color::Rgb(18, 18, 24);
+const ZEBRA_BG: Color = Color::Rgb(30, 30, 40);
+const HIGHLIGHT_BG: Color = Color::Rgb(55, 55, 80);
+const DIM: Color = Color::Rgb(100, 100, 110);
+const ACCENT: Color = Color::Rgb(180, 180, 255);
+const FG: Color = Color::Rgb(220, 220, 230);
+const FG_BRIGHT: Color = Color::Rgb(255, 255, 255);
+const GREEN: Color = Color::Rgb(80, 200, 120);
+const YELLOW: Color = Color::Rgb(220, 200, 80);
+const MATCH_FG: Color = Color::Rgb(255, 200, 60);
+const SEARCH_BG: Color = Color::Rgb(25, 25, 35);
+const MODAL_BG: Color = Color::Rgb(20, 20, 30);
+const MODAL_BORDER: Color = Color::Rgb(80, 80, 110);
+const MODAL_TITLE: Color = Color::Rgb(180, 180, 200);
+const BORDER_FG: Color = Color::Rgb(60, 60, 80);
+const HEADER_FG: Color = Color::Rgb(180, 180, 200);
+const HELP_FG: Color = Color::Rgb(120, 120, 140);
+const STATUS_OK: Color = Color::Rgb(140, 220, 140);
+const STATUS_ERR: Color = Color::Rgb(220, 140, 140);
+const KILL_BORDER: Color = Color::Rgb(200, 80, 80);
+const KILL_BG: Color = Color::Rgb(30, 15, 15);
+const KILL_TITLE: Color = Color::Rgb(220, 140, 140);
+const MODE_NORMAL_BG: Color = Color::Rgb(60, 60, 120);
+const MODE_SEARCH_BG: Color = Color::Rgb(180, 160, 40);
+const MODE_CREATE_BG: Color = Color::Rgb(60, 160, 80);
+const MODE_KILL_BG: Color = Color::Rgb(180, 60, 60);
+const MODE_DARK_FG: Color = Color::Rgb(10, 10, 15);
+const DIM_FG: Color = Color::Rgb(50, 50, 60);
+const DIM_BG: Color = Color::Rgb(10, 10, 15);
+const VERSION_FG: Color = Color::Rgb(80, 80, 100);
+const COUNT_FG: Color = Color::Rgb(100, 100, 120);
+
+fn split_at_char_pos(s: &str, pos: usize) -> (&str, &str) {
+    let byte_pos = s
+        .char_indices()
+        .nth(pos)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    s.split_at(byte_pos)
+}
+
+fn visible_input(input: &str, cursor_pos: usize, max_chars: usize) -> String {
+    let char_count = input.chars().count();
+    if char_count < max_chars {
+        let (before, after) = split_at_char_pos(input, cursor_pos);
+        return format!("{before}|{after}");
+    }
+    let budget = max_chars.saturating_sub(1);
+    let half = budget / 2;
+    let mut start = cursor_pos.saturating_sub(half);
+    let mut end = start + budget;
+    if end > char_count {
+        end = char_count;
+        start = end.saturating_sub(budget);
+    }
+    let left_ellipsis = start > 0;
+    let right_ellipsis = end < char_count;
+    if left_ellipsis {
+        start += 1;
+    }
+    if right_ellipsis && end > start {
+        end -= 1;
+    }
+    let visible: String = input.chars().skip(start).take(end - start).collect();
+    let cursor_in_vis = cursor_pos.saturating_sub(start);
+    let (before, after) = split_at_char_pos(&visible, cursor_in_vis);
+    let mut result = String::new();
+    if left_ellipsis {
+        result.push('\u{2026}');
+    }
+    result.push_str(before);
+    result.push('|');
+    result.push_str(after);
+    if right_ellipsis {
+        result.push('\u{2026}');
+    }
+    result
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        s.to_string()
+    } else if max <= 3 {
+        s.chars().take(max).collect()
+    } else {
+        let t: String = s.chars().take(max - 1).collect();
+        format!("{t}\u{2026}")
+    }
+}
+
+pub fn draw(f: &mut Frame, app: &App) {
+    // Attached mode: render the embedded PTY terminal
+    if app.mode == Mode::Attached {
+        draw_attached(f, app);
+        return;
+    }
+
+    // Paint entire screen with explicit fg + bg on every cell.
+    // This ensures no bleed-through from previous terminal content,
+    // which is critical inside GNU Screen where altscreen may be off.
+    let area = f.area();
+    let buf = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_fg(FG);
+                cell.set_bg(BASE_BG);
+                cell.set_symbol(" ");
+            }
+        }
+    }
+
+    let show_search_bar = app.mode == Mode::Searching || !app.search_input.is_empty();
+    let constraints = if show_search_bar {
+        vec![
+            Constraint::Min(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ]
+    } else {
+        vec![Constraint::Min(3), Constraint::Length(1)]
+    };
+    let chunks = Layout::vertical(constraints).split(f.area());
+
+    draw_table(f, app, chunks[0]);
+    if show_search_bar {
+        draw_search_bar(f, app, chunks[1]);
+        draw_status_bar(f, app, chunks[2]);
+    } else {
+        draw_status_bar(f, app, chunks[1]);
+    }
+
+    match app.mode {
+        Mode::Creating => {
+            dim_background(f);
+            draw_create_modal(f, app);
+        }
+        Mode::Renaming => {
+            dim_background(f);
+            draw_rename_modal(f, app);
+        }
+        Mode::ConfirmKill => {
+            dim_background(f);
+            draw_kill_modal(f, app);
+        }
+        _ => {}
+    }
+
+    if app.show_legend {
+        draw_legend(f, app);
+    }
+}
+
+fn dim_background(f: &mut Frame) {
+    let area = f.area();
+    let buf = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_fg(DIM_FG);
+                cell.set_bg(DIM_BG);
+            }
+        }
+    }
+}
+
+// ── Main table ──────────────────────────────────────────────
+
+fn draw_table(f: &mut Frame, app: &App, area: Rect) {
+    const STATE_W: u16 = 10;
+    const DATE_W: u16 = 22;
+    const COL_SPACING: u16 = 2;
+    const BORDERS: u16 = 2;
+    const HIGHLIGHT_SYM: u16 = 2;
+
+    let fixed = STATE_W + DATE_W + (COL_SPACING * 2) + BORDERS + HIGHLIGHT_SYM;
+    let name_w = area.width.saturating_sub(fixed).max(10);
+    let name_chars = name_w as usize;
+
+    let header_style = Style::default()
+        .fg(HEADER_FG)
+        .bg(BASE_BG)
+        .add_modifier(Modifier::BOLD);
+
+    let header = Row::new(vec![
+        Cell::from("Name"),
+        Cell::from("State"),
+        Cell::from("Date"),
+    ])
+    .style(header_style)
+    .bottom_margin(1);
+
+    let rows: Vec<Row> = app
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(i, session)| {
+            let is_current = app.is_current_session(session);
+
+            let state_color = match session.state {
+                SessionState::Detached => GREEN,
+                SessionState::Attached => YELLOW,
+            };
+
+            let bg = if i % 2 == 1 { ZEBRA_BG } else { BASE_BG };
+            let name_fg = if is_current { ACCENT } else { FG };
+
+            let prefix = if is_current { "\u{25c6} " } else { "  " };
+            let avail = name_chars.saturating_sub(prefix.chars().count());
+            let name_text = truncate(&session.name, avail);
+
+            let prefix_fg = if is_current { ACCENT } else { FG };
+
+            let name_cell = if !app.search_input.is_empty() {
+                if let Some(positions) = fuzzy_match(&session.name, &app.search_input) {
+                    let max_pos = name_text.chars().count();
+                    let highlight_set: std::collections::HashSet<usize> =
+                        positions.into_iter().filter(|&p| p < max_pos).collect();
+                    let mut spans = vec![Span::styled(
+                        prefix.to_string(),
+                        Style::default().fg(prefix_fg).bg(bg),
+                    )];
+                    let normal_style = Style::default().fg(name_fg).bg(bg);
+                    let match_style = Style::default()
+                        .fg(MATCH_FG)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD);
+                    let mut current = String::new();
+                    let mut current_is_match = false;
+                    for (ci, ch) in name_text.chars().enumerate() {
+                        let is_match = highlight_set.contains(&ci);
+                        if is_match != current_is_match && !current.is_empty() {
+                            let style = if current_is_match { match_style } else { normal_style };
+                            spans.push(Span::styled(std::mem::take(&mut current), style));
+                        }
+                        current.push(ch);
+                        current_is_match = is_match;
+                    }
+                    if !current.is_empty() {
+                        let style = if current_is_match { match_style } else { normal_style };
+                        spans.push(Span::styled(current, style));
+                    }
+                    Cell::from(Line::from(spans))
+                } else {
+                    Cell::from(Line::from(vec![
+                        Span::styled(prefix.to_string(), Style::default().fg(prefix_fg).bg(bg)),
+                        Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
+                    ]))
+                }
+            } else {
+                Cell::from(Line::from(vec![
+                    Span::styled(prefix.to_string(), Style::default().fg(prefix_fg).bg(bg)),
+                    Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
+                ]))
+            };
+
+            Row::new(vec![
+                name_cell,
+                Cell::from(Span::styled(
+                    session.state.as_str().to_string(),
+                    Style::default().fg(state_color).bg(bg),
+                )),
+                Cell::from(Span::styled(
+                    session.date.clone(),
+                    Style::default().fg(DIM).bg(bg),
+                )),
+            ])
+            .style(Style::default().fg(FG).bg(bg))
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Min(name_w),
+        Constraint::Length(STATE_W),
+        Constraint::Length(DATE_W),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER_FG).bg(BASE_BG))
+        .style(Style::default().fg(FG).bg(BASE_BG))
+        .title(Line::from(vec![
+            Span::styled(
+                " scrn ",
+                Style::default()
+                    .fg(ACCENT)
+                    .bg(BASE_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("v{} ", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(VERSION_FG).bg(BASE_BG),
+            ),
+        ]));
+
+    if rows.is_empty() {
+        let msg = if !app.search_input.is_empty() {
+            "  No matches"
+        } else {
+            "  No screen sessions found. Press 'c' to create one."
+        };
+        let empty_rows: Vec<Row> = vec![Row::new(vec![Cell::from(Span::styled(
+            msg,
+            Style::default().fg(DIM).bg(BASE_BG),
+        ))])
+        .style(Style::default().fg(DIM).bg(BASE_BG))];
+        let table = Table::new(empty_rows, widths)
+            .header(header)
+            .block(block)
+            .style(Style::default().fg(FG).bg(BASE_BG))
+            .column_spacing(COL_SPACING);
+        f.render_widget(table, area);
+    } else {
+        let table = Table::new(rows, widths)
+            .header(header)
+            .block(block)
+            .style(Style::default().fg(FG).bg(BASE_BG))
+            .column_spacing(COL_SPACING)
+            .row_highlight_style(
+                Style::default()
+                    .fg(FG_BRIGHT)
+                    .bg(HIGHLIGHT_BG)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("\u{25b6} ");
+
+        let mut state = TableState::default();
+        state.select(Some(app.selected));
+
+        f.render_stateful_widget(table, area, &mut state);
+    }
+}
+
+// ── Search bar ──────────────────────────────────────────────
+
+fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
+    let cursor = if app.mode == Mode::Searching {
+        "\u{2502}"
+    } else {
+        ""
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            " /",
+            Style::default()
+                .fg(MATCH_FG)
+                .bg(SEARCH_BG)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            app.search_input.clone(),
+            Style::default().fg(FG_BRIGHT).bg(SEARCH_BG),
+        ),
+        Span::styled(
+            cursor.to_string(),
+            Style::default().fg(MATCH_FG).bg(SEARCH_BG),
+        ),
+        Span::styled(
+            format!("  ({} matches)", app.sessions.len()),
+            Style::default().fg(COUNT_FG).bg(SEARCH_BG),
+        ),
+    ]);
+
+    f.render_widget(
+        Paragraph::new(line).style(Style::default().fg(FG).bg(SEARCH_BG)),
+        area,
+    );
+}
+
+// ── Status bar ──────────────────────────────────────────────
+
+fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
+    let in_screen = app.current_session.is_some();
+    let home_hint = if in_screen { "  d:Home" } else { "" };
+
+    let (mode_text, help_text) = match app.mode {
+        Mode::Normal => (
+            Span::styled(
+                " NORMAL ",
+                Style::default()
+                    .bg(MODE_NORMAL_BG)
+                    .fg(FG_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            format!(
+                " q:Quit  j/k:Nav  Enter:Attach  c:Create  n:Rename  x:Kill{home_hint}  /:Search  r:Refresh  ?:Legend "
+            ),
+        ),
+        Mode::Searching => (
+            Span::styled(
+                " SEARCH ",
+                Style::default()
+                    .bg(MODE_SEARCH_BG)
+                    .fg(MODE_DARK_FG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            " Type to filter  \u{2191}\u{2193}:Navigate  Enter:Keep filter  Esc:Clear ".to_string(),
+        ),
+        Mode::Creating | Mode::Renaming => {
+            let (label, hint) = if app.mode == Mode::Creating {
+                (" CREATE ", " Enter:Create  Esc:Cancel ")
+            } else {
+                (" RENAME ", " Enter:Rename  Esc:Cancel ")
+            };
+            (
+                Span::styled(
+                    label,
+                    Style::default()
+                        .bg(MODE_CREATE_BG)
+                        .fg(MODE_DARK_FG)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                hint.to_string(),
+            )
+        }
+        Mode::ConfirmKill => (
+            Span::styled(
+                " KILL ",
+                Style::default()
+                    .bg(MODE_KILL_BG)
+                    .fg(FG_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            " y/Enter:Confirm  n/Esc:Cancel ".to_string(),
+        ),
+        Mode::Attached => return, // handled by draw_attached
+    };
+
+    let status_spans: Vec<Span> = if app.status_msg.is_empty() {
+        vec![]
+    } else {
+        let is_error = app.status_msg.starts_with("Error");
+        let fg = if is_error { STATUS_ERR } else { STATUS_OK };
+        vec![
+            Span::styled(" ", Style::default().fg(FG).bg(BASE_BG)),
+            Span::styled(app.status_msg.clone(), Style::default().fg(fg).bg(BASE_BG)),
+        ]
+    };
+
+    let mut spans = vec![
+        mode_text,
+        Span::styled(help_text, Style::default().fg(HELP_FG).bg(BASE_BG)),
+    ];
+    spans.extend(status_spans);
+    let line = Line::from(spans);
+
+    f.render_widget(
+        Paragraph::new(line).style(Style::default().fg(FG).bg(BASE_BG)),
+        area,
+    );
+}
+
+// ── Create modal ────────────────────────────────────────────
+
+fn draw_create_modal(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            " New Session ",
+            Style::default()
+                .fg(MODAL_TITLE)
+                .bg(MODAL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let max_chars = inner.width.saturating_sub(2) as usize;
+    let display = visible_input(&app.create_input, app.cursor_pos, max_chars);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            " Session name:",
+            Style::default().fg(DIM).bg(MODAL_BG),
+        )),
+        Line::from(Span::styled(
+            format!(" {display}"),
+            Style::default().fg(FG_BRIGHT).bg(MODAL_BG),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
+        inner,
+    );
+}
+
+// ── Kill confirmation modal ─────────────────────────────────
+
+fn draw_rename_modal(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            " Rename Session ",
+            Style::default()
+                .fg(MODAL_TITLE)
+                .bg(MODAL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let max_chars = inner.width.saturating_sub(2) as usize;
+    let display = visible_input(&app.create_input, app.cursor_pos, max_chars);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            " New name:",
+            Style::default().fg(DIM).bg(MODAL_BG),
+        )),
+        Line::from(Span::styled(
+            format!(" {display}"),
+            Style::default().fg(FG_BRIGHT).bg(MODAL_BG),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
+        inner,
+    );
+}
+
+fn draw_kill_modal(f: &mut Frame, app: &App) {
+    let session_name = app
+        .selected_session()
+        .map(|s| s.name.clone())
+        .unwrap_or_default();
+
+    let area = f.area();
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(KILL_BORDER).bg(KILL_BG))
+        .style(Style::default().fg(FG).bg(KILL_BG))
+        .title(Span::styled(
+            " Kill Session ",
+            Style::default()
+                .fg(KILL_TITLE)
+                .bg(KILL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" Kill '{session_name}'?"),
+            Style::default().fg(FG_BRIGHT).bg(KILL_BG),
+        )),
+        Line::from(Span::styled(
+            " y/Enter: confirm  n/Esc: cancel",
+            Style::default().fg(DIM).bg(KILL_BG),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(KILL_BG)),
+        inner,
+    );
+}
+
+// ── Legend ───────────────────────────────────────────────────
+
+fn draw_legend(f: &mut Frame, app: &App) {
+    let in_screen = app.current_session.is_some();
+
+    let mut entries: Vec<(&str, &str)> = vec![
+        ("Enter", "Attach"),
+        ("c", "Create"),
+        ("n", "Rename"),
+        ("x", "Kill"),
+        ("/", "Search"),
+        ("r", "Refresh"),
+        ("j/k", "Navigate"),
+        ("?", "Legend"),
+        ("q", "Quit"),
+    ];
+    if in_screen {
+        entries.insert(3, ("d", "Go home"));
+    }
+
+    let width: u16 = 22;
+    let height = entries.len() as u16 + 3;
+    let area = f.area();
+    let x = area.width.saturating_sub(width + 2);
+    let y = area.height.saturating_sub(height + 2);
+    let legend_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, legend_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            " Keys ",
+            Style::default()
+                .fg(MODAL_TITLE)
+                .bg(MODAL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(legend_area);
+    f.render_widget(block, legend_area);
+
+    let lines: Vec<Line> = entries
+        .iter()
+        .map(|(key, desc)| {
+            Line::from(vec![
+                Span::styled(
+                    format!(" {key:>5}"),
+                    Style::default().fg(ACCENT).bg(MODAL_BG),
+                ),
+                Span::styled(
+                    format!("  {desc}"),
+                    Style::default().fg(MODAL_TITLE).bg(MODAL_BG),
+                ),
+            ])
+        })
+        .collect();
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
+        inner,
+    );
+}
+
+// ── Attached PTY view ───────────────────────────────────────
+
+fn draw_attached(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(area);
+    let box_area = chunks[0];
+    let status_area = chunks[1];
+
+    // Fill everything with base bg first
+    let buf = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_fg(FG);
+                cell.set_bg(BASE_BG);
+                cell.set_symbol(" ");
+            }
+        }
+    }
+
+    // Draw the bordered box (same style as the session table)
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER_FG).bg(BASE_BG))
+        .style(Style::default().fg(FG).bg(BASE_BG))
+        .title(Line::from(vec![
+            Span::styled(
+                " scrn ",
+                Style::default()
+                    .fg(ACCENT)
+                    .bg(BASE_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} ", app.attached_name),
+                Style::default().fg(FG_BRIGHT).bg(BASE_BG),
+            ),
+        ]));
+
+    let inner = block.inner(box_area);
+    f.render_widget(block, box_area);
+
+    // Render PTY screen contents inside the bordered area
+    if let Some(ref pty) = app.pty_session {
+        let screen = pty.screen();
+        let (scr_rows, scr_cols) = screen.size();
+        let buf = f.buffer_mut();
+
+        for row in 0..inner.height.min(scr_rows) {
+            for col in 0..inner.width.min(scr_cols) {
+                if let Some(vt_cell) = screen.cell(row, col) {
+                    let x = inner.x + col;
+                    let y = inner.y + row;
+                    if let Some(buf_cell) = buf.cell_mut((x, y)) {
+                        let contents = vt_cell.contents();
+                        if contents.is_empty() {
+                            buf_cell.set_symbol(" ");
+                        } else {
+                            buf_cell.set_symbol(&contents);
+                        }
+
+                        let (fg_color, bg_color) = if vt_cell.inverse() {
+                            (vt_bg(vt_cell.bgcolor()), vt_fg(vt_cell.fgcolor()))
+                        } else {
+                            (vt_fg(vt_cell.fgcolor()), vt_bg(vt_cell.bgcolor()))
+                        };
+
+                        let mut mods = Modifier::empty();
+                        if vt_cell.bold() {
+                            mods |= Modifier::BOLD;
+                        }
+                        if vt_cell.italic() {
+                            mods |= Modifier::ITALIC;
+                        }
+                        if vt_cell.underline() {
+                            mods |= Modifier::UNDERLINED;
+                        }
+
+                        buf_cell.set_style(
+                            Style::default()
+                                .fg(fg_color)
+                                .bg(bg_color)
+                                .add_modifier(mods),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Show cursor (offset to inner area)
+        let (cr, cc) = screen.cursor_position();
+        let cursor_x = inner.x + cc;
+        let cursor_y = inner.y + cr;
+        if cursor_x < inner.right() && cursor_y < inner.bottom() {
+            f.set_cursor_position(ratatui::layout::Position {
+                x: cursor_x,
+                y: cursor_y,
+            });
+        }
+    }
+
+    // Status bar
+    let line = Line::from(vec![
+        Span::styled(
+            " ATTACHED ",
+            Style::default()
+                .bg(MODE_CREATE_BG)
+                .fg(MODE_DARK_FG)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {} ", app.attached_name),
+            Style::default().fg(FG_BRIGHT).bg(BASE_BG),
+        ),
+        Span::styled(
+            " Esc Esc:Back  Ctrl+A,D:Detach ",
+            Style::default().fg(HELP_FG).bg(BASE_BG),
+        ),
+    ]);
+    f.render_widget(
+        Paragraph::new(line).style(Style::default().fg(FG).bg(BASE_BG)),
+        status_area,
+    );
+}
+
+fn vt_fg(color: vt100::Color) -> Color {
+    match color {
+        vt100::Color::Default => FG,
+        vt100::Color::Idx(i) => Color::Indexed(i),
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
+}
+
+fn vt_bg(color: vt100::Color) -> Color {
+    match color {
+        vt100::Color::Default => BASE_BG,
+        vt100::Color::Idx(i) => Color::Indexed(i),
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
+}

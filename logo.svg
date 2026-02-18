@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <!-- Rectangular spiral — screens within screens -->
+  <path d="
+    M24 28 L176 28 L176 172 L24 172 L24 52
+    L152 52 L152 148 L48 148 L48 72
+    L128 72 L128 128 L72 128 L72 90
+    L108 90 L108 110"
+    fill="none"
+    stroke="#66BB6A"
+    stroke-width="6"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>
