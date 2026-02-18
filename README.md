@@ -16,16 +16,6 @@ Binaries available for macOS (ARM64/x86_64) and Linux (x86_64/ARM64).
 
 ## Setup
 
-Add to your shell config for full session-switching support:
-
-```bash
-# zsh (~/.zshrc)
-eval "$(scrn init zsh)"
-
-# bash (~/.bashrc)
-eval "$(scrn init bash)"
-```
-
 ```bash
 scrn   # launch
 ```
