@@ -40,11 +40,8 @@ build-linux-x64: (_run "build-linux-x64")
 # Build for Linux ARM64 (static musl)
 build-linux-arm: (_run "build-linux-arm")
 
-# Build for Windows x86_64
-build-windows: (_run "build-windows")
-
 # Bump version, build all targets, and publish to GitHub
-release: _bump (_run "release-all") _publish
+release: _bump (_run "build-arm") (_run "build-intel") (_run "build-linux-x64") (_run "build-linux-arm") _publish
 
 # Prompt for version bump type and update Cargo.toml
 [private]
