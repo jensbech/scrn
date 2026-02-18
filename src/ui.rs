@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
-use crate::app::{fuzzy_match, App, Mode};
+use crate::app::{fuzzy_match, App, ListItem, Mode};
 use crate::screen::SessionState;
 
 // ── Palette — ALL explicit Rgb, zero ANSI named colors ─────
@@ -41,6 +41,8 @@ const DIM_FG: Color = Color::Rgb(50, 50, 60);
 const DIM_BG: Color = Color::Rgb(10, 10, 15);
 const VERSION_FG: Color = Color::Rgb(80, 80, 100);
 const COUNT_FG: Color = Color::Rgb(100, 100, 120);
+const SECTION_FG: Color = Color::Rgb(140, 120, 180);
+const REPO_FG: Color = Color::Rgb(100, 200, 140);
 
 fn split_at_char_pos(s: &str, pos: usize) -> (&str, &str) {
     let byte_pos = s
@@ -203,82 +205,187 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     .style(header_style)
     .bottom_margin(1);
 
+    // Track which visual row index corresponds to the selected selectable item
+    let selected_visual_row = app
+        .selectable_indices
+        .get(app.selected)
+        .copied();
+
+    let mut selectable_row_idx = 0usize;
     let rows: Vec<Row> = app
-        .sessions
+        .display_items
         .iter()
         .enumerate()
-        .map(|(i, session)| {
-            let is_current = app.is_current_session(session);
+        .map(|(_i, item)| match item {
+            ListItem::SectionHeader(title) => {
+                let full_width_name = format!("  {title}");
+                Row::new(vec![
+                    Cell::from(Line::from(Span::styled(
+                        full_width_name,
+                        Style::default()
+                            .fg(SECTION_FG)
+                            .bg(BASE_BG)
+                            .add_modifier(Modifier::BOLD | Modifier::DIM),
+                    ))),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                ])
+                .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
+            }
+            ListItem::SessionItem(session) => {
+                let is_current = app.is_current_session(session);
 
-            let state_color = match session.state {
-                SessionState::Detached => GREEN,
-                SessionState::Attached => YELLOW,
-            };
+                let state_color = match session.state {
+                    SessionState::Detached => GREEN,
+                    SessionState::Attached => YELLOW,
+                };
 
-            let bg = if i % 2 == 1 { ZEBRA_BG } else { BASE_BG };
-            let name_fg = if is_current { ACCENT } else { FG };
+                let bg = if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
+                selectable_row_idx += 1;
+                let name_fg = if is_current { ACCENT } else { FG };
 
-            let prefix = if is_current { "\u{25c6} " } else { "  " };
-            let avail = name_chars.saturating_sub(prefix.chars().count());
-            let name_text = truncate(&session.name, avail);
+                let prefix = if is_current { "\u{25c6} " } else { "  " };
+                let avail = name_chars.saturating_sub(prefix.chars().count());
+                let name_text = truncate(&session.name, avail);
 
-            let prefix_fg = if is_current { ACCENT } else { FG };
+                let prefix_fg = if is_current { ACCENT } else { FG };
 
-            let name_cell = if !app.search_input.is_empty() {
-                if let Some(positions) = fuzzy_match(&session.name, &app.search_input) {
-                    let max_pos = name_text.chars().count();
-                    let highlight_set: std::collections::HashSet<usize> =
-                        positions.into_iter().filter(|&p| p < max_pos).collect();
-                    let mut spans = vec![Span::styled(
-                        prefix.to_string(),
-                        Style::default().fg(prefix_fg).bg(bg),
-                    )];
-                    let normal_style = Style::default().fg(name_fg).bg(bg);
-                    let match_style = Style::default()
-                        .fg(MATCH_FG)
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD);
-                    let mut current = String::new();
-                    let mut current_is_match = false;
-                    for (ci, ch) in name_text.chars().enumerate() {
-                        let is_match = highlight_set.contains(&ci);
-                        if is_match != current_is_match && !current.is_empty() {
-                            let style = if current_is_match { match_style } else { normal_style };
-                            spans.push(Span::styled(std::mem::take(&mut current), style));
+                let name_cell = if !app.search_input.is_empty() {
+                    if let Some(positions) = fuzzy_match(&session.name, &app.search_input) {
+                        let max_pos = name_text.chars().count();
+                        let highlight_set: std::collections::HashSet<usize> =
+                            positions.into_iter().filter(|&p| p < max_pos).collect();
+                        let mut spans = vec![Span::styled(
+                            prefix.to_string(),
+                            Style::default().fg(prefix_fg).bg(bg),
+                        )];
+                        let normal_style = Style::default().fg(name_fg).bg(bg);
+                        let match_style = Style::default()
+                            .fg(MATCH_FG)
+                            .bg(bg)
+                            .add_modifier(Modifier::BOLD);
+                        let mut current = String::new();
+                        let mut current_is_match = false;
+                        for (ci, ch) in name_text.chars().enumerate() {
+                            let is_match = highlight_set.contains(&ci);
+                            if is_match != current_is_match && !current.is_empty() {
+                                let style =
+                                    if current_is_match { match_style } else { normal_style };
+                                spans.push(Span::styled(std::mem::take(&mut current), style));
+                            }
+                            current.push(ch);
+                            current_is_match = is_match;
                         }
-                        current.push(ch);
-                        current_is_match = is_match;
+                        if !current.is_empty() {
+                            let style =
+                                if current_is_match { match_style } else { normal_style };
+                            spans.push(Span::styled(current, style));
+                        }
+                        Cell::from(Line::from(spans))
+                    } else {
+                        Cell::from(Line::from(vec![
+                            Span::styled(
+                                prefix.to_string(),
+                                Style::default().fg(prefix_fg).bg(bg),
+                            ),
+                            Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
+                        ]))
                     }
-                    if !current.is_empty() {
-                        let style = if current_is_match { match_style } else { normal_style };
-                        spans.push(Span::styled(current, style));
-                    }
-                    Cell::from(Line::from(spans))
                 } else {
                     Cell::from(Line::from(vec![
-                        Span::styled(prefix.to_string(), Style::default().fg(prefix_fg).bg(bg)),
+                        Span::styled(
+                            prefix.to_string(),
+                            Style::default().fg(prefix_fg).bg(bg),
+                        ),
                         Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
                     ]))
-                }
-            } else {
-                Cell::from(Line::from(vec![
-                    Span::styled(prefix.to_string(), Style::default().fg(prefix_fg).bg(bg)),
-                    Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
-                ]))
-            };
+                };
 
-            Row::new(vec![
-                name_cell,
-                Cell::from(Span::styled(
-                    session.state.as_str().to_string(),
-                    Style::default().fg(state_color).bg(bg),
-                )),
-                Cell::from(Span::styled(
-                    session.date.clone(),
-                    Style::default().fg(DIM).bg(bg),
-                )),
-            ])
-            .style(Style::default().fg(FG).bg(bg))
+                Row::new(vec![
+                    name_cell,
+                    Cell::from(Span::styled(
+                        session.state.as_str().to_string(),
+                        Style::default().fg(state_color).bg(bg),
+                    )),
+                    Cell::from(Span::styled(
+                        session.date.clone(),
+                        Style::default().fg(DIM).bg(bg),
+                    )),
+                ])
+                .style(Style::default().fg(FG).bg(bg))
+            }
+            ListItem::RepoItem(repo) => {
+                let bg = if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
+                selectable_row_idx += 1;
+
+                let prefix = "  ";
+                let avail = name_chars.saturating_sub(prefix.chars().count());
+                let name_text = truncate(&repo.name, avail);
+
+                let name_cell = if !app.search_input.is_empty() {
+                    if let Some(positions) = fuzzy_match(&repo.name, &app.search_input) {
+                        let max_pos = name_text.chars().count();
+                        let highlight_set: std::collections::HashSet<usize> =
+                            positions.into_iter().filter(|&p| p < max_pos).collect();
+                        let mut spans = vec![Span::styled(
+                            prefix.to_string(),
+                            Style::default().fg(REPO_FG).bg(bg),
+                        )];
+                        let normal_style = Style::default().fg(REPO_FG).bg(bg);
+                        let match_style = Style::default()
+                            .fg(MATCH_FG)
+                            .bg(bg)
+                            .add_modifier(Modifier::BOLD);
+                        let mut current = String::new();
+                        let mut current_is_match = false;
+                        for (ci, ch) in name_text.chars().enumerate() {
+                            let is_match = highlight_set.contains(&ci);
+                            if is_match != current_is_match && !current.is_empty() {
+                                let style =
+                                    if current_is_match { match_style } else { normal_style };
+                                spans.push(Span::styled(std::mem::take(&mut current), style));
+                            }
+                            current.push(ch);
+                            current_is_match = is_match;
+                        }
+                        if !current.is_empty() {
+                            let style =
+                                if current_is_match { match_style } else { normal_style };
+                            spans.push(Span::styled(current, style));
+                        }
+                        Cell::from(Line::from(spans))
+                    } else {
+                        Cell::from(Line::from(vec![
+                            Span::styled(
+                                prefix.to_string(),
+                                Style::default().fg(REPO_FG).bg(bg),
+                            ),
+                            Span::styled(name_text, Style::default().fg(REPO_FG).bg(bg)),
+                        ]))
+                    }
+                } else {
+                    Cell::from(Line::from(vec![
+                        Span::styled(
+                            prefix.to_string(),
+                            Style::default().fg(REPO_FG).bg(bg),
+                        ),
+                        Span::styled(name_text, Style::default().fg(REPO_FG).bg(bg)),
+                    ]))
+                };
+
+                Row::new(vec![
+                    name_cell,
+                    Cell::from(Span::styled(
+                        "New".to_string(),
+                        Style::default().fg(DIM).bg(bg),
+                    )),
+                    Cell::from(Span::styled(
+                        String::new(),
+                        Style::default().fg(DIM).bg(bg),
+                    )),
+                ])
+                .style(Style::default().fg(FG).bg(bg))
+            }
         })
         .collect();
 
@@ -306,7 +413,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
             ),
         ]));
 
-    if rows.is_empty() {
+    if app.selectable_indices.is_empty() {
         let msg = if !app.search_input.is_empty() {
             "  No matches"
         } else {
@@ -338,7 +445,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
             .highlight_symbol("\u{25b6} ");
 
         let mut state = TableState::default();
-        state.select(Some(app.selected));
+        state.select(selected_visual_row);
 
         f.render_stateful_widget(table, area, &mut state);
     }
@@ -369,7 +476,7 @@ fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(MATCH_FG).bg(SEARCH_BG),
         ),
         Span::styled(
-            format!("  ({} matches)", app.sessions.len()),
+            format!("  ({} matches)", app.selectable_indices.len()),
             Style::default().fg(COUNT_FG).bg(SEARCH_BG),
         ),
     ]);
@@ -559,8 +666,9 @@ fn draw_rename_modal(f: &mut Frame, app: &App) {
 
 fn draw_kill_modal(f: &mut Frame, app: &App) {
     let session_name = app
-        .selected_session()
-        .map(|s| s.name.clone())
+        .kill_session_info
+        .as_ref()
+        .map(|(name, _)| name.clone())
         .unwrap_or_default();
 
     let area = f.area();

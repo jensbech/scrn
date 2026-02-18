@@ -1,7 +1,9 @@
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::pty::PtySession;
 use crate::screen::{self, Session};
+use crate::workspace::{self, RepoEntry};
 
 #[derive(PartialEq)]
 pub enum Mode {
@@ -16,6 +18,13 @@ pub enum Mode {
 pub enum Action {
     GoHome,
     None,
+}
+
+#[derive(Clone)]
+pub enum ListItem {
+    SectionHeader(String),
+    SessionItem(Session),
+    RepoItem(RepoEntry),
 }
 
 pub struct App {
@@ -35,10 +44,15 @@ pub struct App {
     pub pty_session: Option<PtySession>,
     pub attached_name: String,
     pub rename_pid_name: String,
+    pub workspace_dir: Option<PathBuf>,
+    pub workspace_repos: Vec<RepoEntry>,
+    pub display_items: Vec<ListItem>,
+    pub selectable_indices: Vec<usize>,
+    pub kill_session_info: Option<(String, String)>,
 }
 
 impl App {
-    pub fn new(action_file: Option<String>) -> Self {
+    pub fn new(action_file: Option<String>, workspace: Option<PathBuf>) -> Self {
         let current_session = std::env::var("STY").ok();
         Self {
             sessions: Vec::new(),
@@ -57,6 +71,11 @@ impl App {
             pty_session: None,
             attached_name: String::new(),
             rename_pid_name: String::new(),
+            workspace_dir: workspace,
+            workspace_repos: Vec::new(),
+            display_items: Vec::new(),
+            selectable_indices: Vec::new(),
+            kill_session_info: None,
         }
     }
 
@@ -64,12 +83,15 @@ impl App {
         match screen::list_sessions() {
             Ok(sessions) => {
                 self.all_sessions = sessions;
-                self.apply_search_filter();
             }
             Err(e) => {
                 self.set_status(format!("Error: {e}"));
             }
         }
+        if let Some(ref dir) = self.workspace_dir {
+            self.workspace_repos = workspace::scan_repos(dir);
+        }
+        self.apply_search_filter();
     }
 
     pub fn set_status(&mut self, msg: String) {
@@ -84,7 +106,7 @@ impl App {
     }
 
     pub fn move_down(&mut self) {
-        if !self.sessions.is_empty() && self.selected < self.sessions.len() - 1 {
+        if !self.selectable_indices.is_empty() && self.selected < self.selectable_indices.len() - 1 {
             self.selected += 1;
         }
     }
@@ -99,12 +121,9 @@ impl App {
             .all_sessions
             .iter()
             .filter(|s| {
-                // Hide the session we're currently inside
                 if self.is_current_session(s) {
                     return false;
                 }
-                // Hide auto-named sessions (no explicit -S name given)
-                // These have tty device names like "ttys006.hostname" or "pts/0.hostname"
                 if s.name.starts_with("tty") || s.name.starts_with("pts") {
                     return false;
                 }
@@ -117,8 +136,95 @@ impl App {
             })
             .cloned()
             .collect();
-        if self.selected >= self.sessions.len() {
-            self.selected = self.sessions.len().saturating_sub(1);
+        self.rebuild_display_list();
+    }
+
+    fn rebuild_display_list(&mut self) {
+        self.display_items.clear();
+        self.selectable_indices.clear();
+
+        // Filter repos: exclude those whose name matches an existing session name,
+        // and apply search filter
+        let session_names: std::collections::HashSet<&str> =
+            self.sessions.iter().map(|s| s.name.as_str()).collect();
+
+        let filtered_repos: Vec<&RepoEntry> = self
+            .workspace_repos
+            .iter()
+            .filter(|r| {
+                if session_names.contains(r.name.as_str()) {
+                    return false;
+                }
+                if self.search_input.is_empty() {
+                    true
+                } else {
+                    fuzzy_match(&r.name, &self.search_input).is_some()
+                }
+            })
+            .collect();
+
+        let has_sessions = !self.sessions.is_empty();
+        let has_repos = !filtered_repos.is_empty();
+        let searching = !self.search_input.is_empty();
+
+        if has_sessions && has_repos && !searching {
+            self.display_items
+                .push(ListItem::SectionHeader("Sessions".to_string()));
+        }
+        for session in &self.sessions {
+            let idx = self.display_items.len();
+            self.display_items
+                .push(ListItem::SessionItem(session.clone()));
+            self.selectable_indices.push(idx);
+        }
+
+        if searching {
+            // Flat list when searching — no group headers
+            for repo in &filtered_repos {
+                let idx = self.display_items.len();
+                self.display_items
+                    .push(ListItem::RepoItem((*repo).clone()));
+                self.selectable_indices.push(idx);
+            }
+        } else {
+            // Group repos by their group field, emitting a header per group
+            let mut current_group: Option<&str> = None;
+            for repo in &filtered_repos {
+                if current_group != Some(&repo.group) {
+                    current_group = Some(&repo.group);
+                    let header = if repo.group.is_empty() {
+                        // Repos directly under workspace root
+                        if has_sessions {
+                            "Workspaces".to_string()
+                        } else {
+                            // Only show group headers when there are multiple groups
+                            let has_multiple_groups = filtered_repos
+                                .iter()
+                                .any(|r| r.group != filtered_repos[0].group);
+                            if has_multiple_groups {
+                                "Workspaces".to_string()
+                            } else {
+                                // Single group with no sessions — skip header
+                                String::new()
+                            }
+                        }
+                    } else {
+                        repo.group.clone()
+                    };
+                    if !header.is_empty() {
+                        self.display_items
+                            .push(ListItem::SectionHeader(header));
+                    }
+                }
+                let idx = self.display_items.len();
+                self.display_items
+                    .push(ListItem::RepoItem((*repo).clone()));
+                self.selectable_indices.push(idx);
+            }
+        }
+
+        if self.selected >= self.selectable_indices.len() {
+            self.selected = self.selectable_indices.len().saturating_sub(1);
         }
     }
 
@@ -132,33 +238,69 @@ impl App {
         self.mode = Mode::Normal;
     }
 
+    pub fn selected_display_item(&self) -> Option<&ListItem> {
+        self.selectable_indices
+            .get(self.selected)
+            .and_then(|&idx| self.display_items.get(idx))
+    }
+
+    fn attach_session(&mut self, name: &str, pid_name: &str, term_rows: u16, term_cols: u16) {
+        if let Some(ref current) = self.current_session {
+            if *current == pid_name {
+                self.set_status("Already in this session".to_string());
+                return;
+            }
+        }
+        let pty_rows = term_rows.saturating_sub(3);
+        let pty_cols = term_cols.saturating_sub(2);
+        let rc = crate::screen::ensure_screenrc();
+        match PtySession::spawn("screen", &["-c", &rc, "-r", pid_name], pty_rows, pty_cols) {
+            Ok(pty) => {
+                pty.write_all(b"\x0c");
+                self.pty_session = Some(pty);
+                self.attached_name = name.to_string();
+                self.mode = Mode::Attached;
+            }
+            Err(e) => {
+                self.set_status(format!("Failed to attach: {e}"));
+            }
+        }
+    }
+
     pub fn attach_selected(&mut self, term_rows: u16, term_cols: u16) {
-        if let Some(session) = self.sessions.get(self.selected) {
-            if let Some(ref current) = self.current_session {
-                if *current == session.pid_name {
-                    self.set_status("Already in this session".to_string());
-                    return;
+        let item = match self.selected_display_item() {
+            Some(item) => item.clone(),
+            None => return,
+        };
+        match item {
+            ListItem::SessionItem(session) => {
+                let name = session.name.clone();
+                let pid_name = session.pid_name.clone();
+                self.attach_session(&name, &pid_name, term_rows, term_cols);
+            }
+            ListItem::RepoItem(repo) => {
+                let name = repo.name.clone();
+                let path = repo.path.clone();
+                match screen::create_session_in_dir(&name, &path) {
+                    Ok(()) => {
+                        self.set_status(format!("Created session '{name}'"));
+                        self.refresh_sessions();
+                        // Find the newly created session and attach
+                        let pid_name = self
+                            .sessions
+                            .iter()
+                            .find(|s| s.name == name)
+                            .map(|s| s.pid_name.clone());
+                        if let Some(pid_name) = pid_name {
+                            self.attach_session(&name, &pid_name, term_rows, term_cols);
+                        }
+                    }
+                    Err(e) => {
+                        self.set_status(format!("Error: {e}"));
+                    }
                 }
             }
-            let name = session.name.clone();
-            let pid_name = session.pid_name.clone();
-            // Reserve: 2 rows for block borders + 1 row for status bar, 2 cols for borders
-            let pty_rows = term_rows.saturating_sub(3);
-            let pty_cols = term_cols.saturating_sub(2);
-            let rc = crate::screen::ensure_screenrc();
-            match PtySession::spawn("screen", &["-c", &rc, "-r", &pid_name], pty_rows, pty_cols) {
-                Ok(pty) => {
-                    // Clear shell so prompt starts at top (fixes size
-                    // mismatch from sessions created with `screen -dmS`)
-                    pty.write_all(b"\x0c");
-                    self.pty_session = Some(pty);
-                    self.attached_name = name;
-                    self.mode = Mode::Attached;
-                }
-                Err(e) => {
-                    self.set_status(format!("Failed to attach: {e}"));
-                }
-            }
+            ListItem::SectionHeader(_) => {}
         }
     }
 
@@ -171,7 +313,6 @@ impl App {
 
     pub fn resize_pty(&mut self, term_rows: u16, term_cols: u16) {
         if let Some(ref mut pty) = self.pty_session {
-            // Same border math as attach_selected
             let pty_rows = term_rows.saturating_sub(3);
             let pty_cols = term_cols.saturating_sub(2);
             pty.resize(pty_rows, pty_cols);
@@ -207,9 +348,9 @@ impl App {
     }
 
     pub fn start_rename(&mut self) {
-        if let Some(session) = self.sessions.get(self.selected) {
-            self.rename_pid_name = session.pid_name.clone();
-            self.create_input = session.name.clone();
+        if let Some(ListItem::SessionItem(session)) = self.selected_display_item().cloned() {
+            self.rename_pid_name = session.pid_name;
+            self.create_input = session.name;
             self.cursor_pos = self.create_input.chars().count();
             self.mode = Mode::Renaming;
         }
@@ -238,16 +379,17 @@ impl App {
     }
 
     pub fn start_kill(&mut self) {
-        if !self.sessions.is_empty() {
+        if let Some(ListItem::SessionItem(session)) = self.selected_display_item() {
+            self.kill_session_info = Some((session.name.clone(), session.pid_name.clone()));
             self.mode = Mode::ConfirmKill;
         }
     }
 
     pub fn confirm_kill(&mut self) {
-        if let Some(session) = self.sessions.get(self.selected).cloned() {
-            match screen::kill_session(&session.pid_name) {
+        if let Some((name, pid_name)) = self.kill_session_info.take() {
+            match screen::kill_session(&pid_name) {
                 Ok(()) => {
-                    self.set_status(format!("Killed '{}'", session.name));
+                    self.set_status(format!("Killed '{name}'"));
                     self.refresh_sessions();
                 }
                 Err(e) => {
@@ -259,6 +401,7 @@ impl App {
     }
 
     pub fn cancel_kill(&mut self) {
+        self.kill_session_info = None;
         self.mode = Mode::Normal;
     }
 
@@ -266,10 +409,6 @@ impl App {
         if self.current_session.is_some() {
             self.action = Action::GoHome;
         }
-    }
-
-    pub fn selected_session(&self) -> Option<&Session> {
-        self.sessions.get(self.selected)
     }
 
     pub fn is_current_session(&self, session: &Session) -> bool {

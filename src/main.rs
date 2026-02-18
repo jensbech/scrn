@@ -1,8 +1,10 @@
 mod app;
+mod config;
 mod pty;
 mod screen;
 mod shell;
 mod ui;
+mod workspace;
 
 use std::fs;
 use std::io;
@@ -73,19 +75,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Parse --action-file flag
+    // Parse flags
     let mut action_file = None;
+    let mut cli_workspace = None;
     let mut i = 1;
     while i < args.len() {
-        if args[i] == "--action-file" {
-            if let Some(path) = args.get(i + 1) {
-                action_file = Some(path.clone());
-                i += 2;
-                continue;
+        match args[i].as_str() {
+            "--action-file" => {
+                if let Some(path) = args.get(i + 1) {
+                    action_file = Some(path.clone());
+                    i += 2;
+                    continue;
+                }
             }
+            "--workspace" | "-w" => {
+                if let Some(path) = args.get(i + 1) {
+                    cli_workspace = Some(path.clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            _ => {}
         }
         i += 1;
     }
+
+    let cfg = config::Config::load(cli_workspace.as_deref());
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
@@ -95,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     terminal.clear()?;
 
-    let mut app = App::new(action_file);
+    let mut app = App::new(action_file, cfg.workspace);
     app.refresh_sessions();
 
     let exit_action;
