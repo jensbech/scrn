@@ -6,6 +6,10 @@
 
 <p align="center">A terminal UI for managing GNU Screen sessions.</p>
 
+## Requirements
+
+GNU Screen **5.0+** is required for truecolor support. On macOS, run `brew install screen` to get it. scrn checks at startup and will tell you if your version is too old.
+
 ## Install
 
 ```bash
