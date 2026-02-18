@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -710,64 +712,19 @@ fn draw_attached(f: &mut Frame, app: &App) {
     let inner = block.inner(box_area);
     f.render_widget(block, box_area);
 
-    // Render PTY screen contents inside the bordered area
-    if let Some(ref pty) = app.pty_session {
-        let screen = pty.screen();
-        let (scr_rows, scr_cols) = screen.size();
-        let buf = f.buffer_mut();
-
-        for row in 0..inner.height.min(scr_rows) {
-            for col in 0..inner.width.min(scr_cols) {
-                if let Some(vt_cell) = screen.cell(row, col) {
-                    let x = inner.x + col;
-                    let y = inner.y + row;
-                    if let Some(buf_cell) = buf.cell_mut((x, y)) {
-                        let contents = vt_cell.contents();
-                        if contents.is_empty() {
-                            buf_cell.set_symbol(" ");
-                        } else {
-                            buf_cell.set_symbol(&contents);
-                        }
-
-                        let (fg_color, bg_color) = if vt_cell.inverse() {
-                            (vt_bg(vt_cell.bgcolor()), vt_fg(vt_cell.fgcolor()))
-                        } else {
-                            (vt_fg(vt_cell.fgcolor()), vt_bg(vt_cell.bgcolor()))
-                        };
-
-                        let mut mods = Modifier::empty();
-                        if vt_cell.bold() {
-                            mods |= Modifier::BOLD;
-                        }
-                        if vt_cell.italic() {
-                            mods |= Modifier::ITALIC;
-                        }
-                        if vt_cell.underline() {
-                            mods |= Modifier::UNDERLINED;
-                        }
-
-                        buf_cell.set_style(
-                            Style::default()
-                                .fg(fg_color)
-                                .bg(bg_color)
-                                .add_modifier(mods),
-                        );
-                    }
-                }
+    // Mark PTY inner area cells as skip — we render them directly to the
+    // terminal after ratatui's draw, bypassing crossterm's color conversion.
+    let buf = f.buffer_mut();
+    for y in inner.top()..inner.bottom() {
+        for x in inner.left()..inner.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.skip = true;
             }
         }
-
-        // Show cursor (offset to inner area)
-        let (cr, cc) = screen.cursor_position();
-        let cursor_x = inner.x + cc;
-        let cursor_y = inner.y + cr;
-        if cursor_x < inner.right() && cursor_y < inner.bottom() {
-            f.set_cursor_position(ratatui::layout::Position {
-                x: cursor_x,
-                y: cursor_y,
-            });
-        }
     }
+
+    // Don't call set_cursor_position here — we handle cursor in
+    // render_pty_direct to avoid jumping during the direct write.
 
     // Status bar
     let line = Line::from(vec![
@@ -793,18 +750,199 @@ fn draw_attached(f: &mut Frame, app: &App) {
     );
 }
 
-fn vt_fg(color: vt100::Color) -> Color {
-    match color {
-        vt100::Color::Default => FG,
-        vt100::Color::Idx(i) => Color::Indexed(i),
-        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+/// Render PTY content directly to the terminal, bypassing ratatui/crossterm.
+///
+/// Reads each cell from vt100 and emits ANSI escape codes directly.
+/// Default fg/bg are mapped to scrn's theme colors so the PTY area
+/// blends visually with the surrounding border.
+pub fn render_pty_direct(
+    w: &mut impl Write,
+    screen: &vt100::Screen,
+    inner_x: u16,
+    inner_y: u16,
+    inner_w: u16,
+    inner_h: u16,
+) -> std::io::Result<()> {
+    let (scr_rows, scr_cols) = screen.size();
+    let mut buf = Vec::with_capacity(inner_w as usize * inner_h as usize * 8);
+
+    // Hide cursor while we write to prevent visible jumping
+    buf.extend_from_slice(b"\x1b[?25l");
+
+    for row in 0..inner_h.min(scr_rows) {
+        // Position cursor at start of this row (1-based ANSI coordinates)
+        write!(buf, "\x1b[{};{}H", inner_y + row + 1, inner_x + 1)?;
+
+        let mut prev: Option<CellStyle> = None;
+
+        for col in 0..inner_w.min(scr_cols) {
+            if let Some(vt_cell) = screen.cell(row, col) {
+                if vt_cell.is_wide_continuation() {
+                    continue;
+                }
+
+                let style = CellStyle::from_vt(vt_cell);
+                if prev.as_ref() != Some(&style) {
+                    write_sgr(&mut buf, &style)?;
+                    prev = Some(style);
+                }
+
+                let contents = vt_cell.contents();
+                if contents.is_empty() {
+                    buf.push(b' ');
+                } else {
+                    buf.extend_from_slice(contents.as_bytes());
+                }
+            }
+        }
+
+        // Fill remaining columns (if PTY narrower than inner area)
+        let filled = inner_w.min(scr_cols);
+        if filled < inner_w {
+            let fill_style = CellStyle::default_cell();
+            if prev.as_ref() != Some(&fill_style) {
+                write_sgr(&mut buf, &fill_style)?;
+            }
+            for _ in filled..inner_w {
+                buf.push(b' ');
+            }
+        }
+    }
+
+    // Fill remaining rows (if PTY shorter than inner area)
+    let filled_rows = inner_h.min(scr_rows);
+    if filled_rows < inner_h {
+        let fill_style = CellStyle::default_cell();
+        write_sgr(&mut buf, &fill_style)?;
+        for row in filled_rows..inner_h {
+            write!(buf, "\x1b[{};{}H", inner_y + row + 1, inner_x + 1)?;
+            for _ in 0..inner_w {
+                buf.push(b' ');
+            }
+        }
+    }
+
+    // Reset attributes and position cursor
+    buf.extend_from_slice(b"\x1b[0m");
+
+    let (cr, cc) = screen.cursor_position();
+    let cursor_x = inner_x + cc + 1; // 1-based
+    let cursor_y = inner_y + cr + 1;
+    write!(buf, "\x1b[{};{}H", cursor_y, cursor_x)?;
+    // Show cursor
+    buf.extend_from_slice(b"\x1b[?25h");
+
+    w.write_all(&buf)?;
+    w.flush()
+}
+
+#[derive(PartialEq)]
+struct CellStyle {
+    fg: vt100::Color,
+    bg: vt100::Color,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    inverse: bool,
+}
+
+impl CellStyle {
+    fn from_vt(cell: &vt100::Cell) -> Self {
+        Self {
+            fg: cell.fgcolor(),
+            bg: cell.bgcolor(),
+            bold: cell.bold(),
+            italic: cell.italic(),
+            underline: cell.underline(),
+            inverse: cell.inverse(),
+        }
+    }
+
+    fn default_cell() -> Self {
+        Self {
+            fg: vt100::Color::Default,
+            bg: vt100::Color::Default,
+            bold: false,
+            italic: false,
+            underline: false,
+            inverse: false,
+        }
     }
 }
 
-fn vt_bg(color: vt100::Color) -> Color {
-    match color {
-        vt100::Color::Default => BASE_BG,
-        vt100::Color::Idx(i) => Color::Indexed(i),
-        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+fn write_sgr(buf: &mut Vec<u8>, s: &CellStyle) -> std::io::Result<()> {
+    // For cells with inverse, we do the color swap ourselves so that
+    // Default colors map to our theme correctly. The terminal's \e[7m
+    // would swap the ANSI "default" colors (white/black), not our theme.
+    if s.inverse {
+        // Swap fg/bg: display bg-color as text, fg-color as background
+        buf.extend_from_slice(b"\x1b[0");
+        if s.bold {
+            buf.extend_from_slice(b";1");
+        }
+        if s.italic {
+            buf.extend_from_slice(b";3");
+        }
+        if s.underline {
+            buf.extend_from_slice(b";4");
+        }
+        // Emit swapped colors: bg→fg, fg→bg
+        write_color(buf, s.bg, true)?;
+        write_color(buf, s.fg, false)?;
+        buf.push(b'm');
+    } else {
+        buf.extend_from_slice(b"\x1b[0");
+        if s.bold {
+            buf.extend_from_slice(b";1");
+        }
+        if s.italic {
+            buf.extend_from_slice(b";3");
+        }
+        if s.underline {
+            buf.extend_from_slice(b";4");
+        }
+        write_color(buf, s.fg, true)?;
+        write_color(buf, s.bg, false)?;
+        buf.push(b'm');
     }
+    Ok(())
 }
+
+fn write_color(buf: &mut Vec<u8>, color: vt100::Color, is_fg: bool) -> std::io::Result<()> {
+    match color {
+        vt100::Color::Default => {
+            // Map Default to scrn's theme colors so PTY blends with border
+            if is_fg {
+                buf.extend_from_slice(b";38;2;220;220;230");
+            } else {
+                buf.extend_from_slice(b";48;2;18;18;24");
+            }
+        }
+        vt100::Color::Idx(i) if i < 8 => {
+            // Standard ANSI: \e[30-37m / \e[40-47m
+            write!(buf, ";{}", if is_fg { 30 + i as u16 } else { 40 + i as u16 })?;
+        }
+        vt100::Color::Idx(i) if i < 16 => {
+            // Bright ANSI: \e[90-97m / \e[100-107m
+            write!(
+                buf,
+                ";{}",
+                if is_fg {
+                    90 + (i - 8) as u16
+                } else {
+                    100 + (i - 8) as u16
+                }
+            )?;
+        }
+        vt100::Color::Idx(i) => {
+            // 256-color: \e[38;5;Nm / \e[48;5;Nm
+            write!(buf, ";{};5;{}", if is_fg { 38 } else { 48 }, i)?;
+        }
+        vt100::Color::Rgb(r, g, b) => {
+            write!(buf, ";{};2;{};{};{}", if is_fg { 38 } else { 48 }, r, g, b)?;
+        }
+    }
+    Ok(())
+}
+
+

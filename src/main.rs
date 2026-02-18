@@ -111,6 +111,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         terminal.draw(|f| ui::draw(f, &app))?;
 
+        // Render PTY content directly to the terminal, bypassing ratatui/crossterm.
+        // This preserves exact ANSI color codes that terminals expect.
+        if app.mode == Mode::Attached {
+            if let Some(ref pty) = app.pty_session {
+                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                // Inner area = full area minus 1-cell border on each side minus status bar
+                let inner_x = 1u16;
+                let inner_y = 1u16;
+                let inner_w = cols.saturating_sub(2);
+                let inner_h = rows.saturating_sub(3);
+                ui::render_pty_direct(
+                    terminal.backend_mut(),
+                    pty.screen(),
+                    inner_x,
+                    inner_y,
+                    inner_w,
+                    inner_h,
+                )?;
+            }
+        }
+
         // Auto-clear stale status messages (only in list view)
         if app.mode != Mode::Attached
             && !app.status_msg.is_empty()
