@@ -535,12 +535,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else {
                                 last_esc = None;
                                 // Forward everything else to the active pane's PTY
-                                let bytes = pty::key_to_bytes(&key);
                                 let active_pty = match app.active_pane {
                                     Pane::Left => app.pty_session.as_ref(),
                                     Pane::Right => app.pty_right.as_ref(),
                                 };
                                 if let Some(pty) = active_pty {
+                                    let bytes = pty::key_to_bytes(&key, pty.application_cursor());
                                     pty.write_all(&bytes);
                                 }
                             }

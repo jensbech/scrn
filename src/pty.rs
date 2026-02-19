@@ -143,6 +143,11 @@ impl PtySession {
         available
     }
 
+    /// Whether the terminal is in application cursor key mode (DECCKM).
+    pub fn application_cursor(&self) -> bool {
+        self.parser.screen().application_cursor()
+    }
+
     /// Raw file descriptor for the PTY master (for multiplexed poll).
     pub fn master_fd(&self) -> i32 {
         self.master.as_raw_fd()
@@ -174,7 +179,9 @@ impl Drop for PtySession {
 }
 
 /// Convert a crossterm KeyEvent to raw bytes for the PTY.
-pub fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
+/// When `app_cursor` is true the terminal is in application cursor mode
+/// (DECCKM), so arrow keys use `\x1bO` prefix instead of `\x1b[`.
+pub fn key_to_bytes(key: &KeyEvent, app_cursor: bool) -> Vec<u8> {
     // Ctrl+key
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         if let KeyCode::Char(c) = key.code {
@@ -194,6 +201,9 @@ pub fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
         }
     }
 
+    // Arrow keys: application mode uses \x1bO prefix, normal uses \x1b[
+    let arrow_prefix: &[u8] = if app_cursor { b"\x1bO" } else { b"\x1b[" };
+
     match key.code {
         KeyCode::Char(c) => {
             let mut buf = [0u8; 4];
@@ -205,10 +215,10 @@ pub fn key_to_bytes(key: &KeyEvent) -> Vec<u8> {
         KeyCode::Tab => vec![b'\t'],
         KeyCode::BackTab => b"\x1b[Z".to_vec(),
         KeyCode::Esc => vec![0x1b],
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
+        KeyCode::Up => [arrow_prefix, b"A"].concat(),
+        KeyCode::Down => [arrow_prefix, b"B"].concat(),
+        KeyCode::Right => [arrow_prefix, b"C"].concat(),
+        KeyCode::Left => [arrow_prefix, b"D"].concat(),
         KeyCode::Home => b"\x1b[H".to_vec(),
         KeyCode::End => b"\x1b[F".to_vec(),
         KeyCode::PageUp => b"\x1b[5~".to_vec(),
