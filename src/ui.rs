@@ -996,7 +996,11 @@ pub fn two_pane_geometry(cols: u16, rows: u16) -> (u16, u16, u16, u16, u16, u16)
     (left_x, left_w, right_x, right_w, inner_y, inner_h)
 }
 
-/// Render PTY content directly to the terminal, bypassing ratatui/crossterm.
+/// Render PTY cell content directly to the terminal, bypassing ratatui.
+///
+/// This function ONLY writes cell content — no cursor hide/show.
+/// Cursor visibility is managed by the caller at the frame level to
+/// avoid flicker from repeated hide/show cycles.
 pub fn render_pty_direct(
     w: &mut impl Write,
     screen: &vt100::Screen,
@@ -1004,16 +1008,11 @@ pub fn render_pty_direct(
     inner_y: u16,
     inner_w: u16,
     inner_h: u16,
-    show_cursor: bool,
 ) -> std::io::Result<()> {
     let (scr_rows, scr_cols) = screen.size();
     let mut buf = Vec::with_capacity(inner_w as usize * inner_h as usize * 8);
 
-    // Hide cursor while we write to prevent visible jumping
-    buf.extend_from_slice(b"\x1b[?25l");
-
     for row in 0..inner_h.min(scr_rows) {
-        // Position cursor at start of this row (1-based ANSI coordinates)
         write!(buf, "\x1b[{};{}H", inner_y + row + 1, inner_x + 1)?;
 
         let mut prev: Option<CellStyle> = None;
@@ -1039,7 +1038,6 @@ pub fn render_pty_direct(
             }
         }
 
-        // Fill remaining columns (if PTY narrower than inner area)
         let filled = inner_w.min(scr_cols);
         if filled < inner_w {
             let fill_style = CellStyle::default_cell();
@@ -1052,7 +1050,6 @@ pub fn render_pty_direct(
         }
     }
 
-    // Fill remaining rows (if PTY shorter than inner area)
     let filled_rows = inner_h.min(scr_rows);
     if filled_rows < inner_h {
         let fill_style = CellStyle::default_cell();
@@ -1065,19 +1062,29 @@ pub fn render_pty_direct(
         }
     }
 
-    // Reset attributes
     buf.extend_from_slice(b"\x1b[0m");
-
-    if show_cursor {
-        let (cr, cc) = screen.cursor_position();
-        let cursor_x = inner_x + cc + 1; // 1-based
-        let cursor_y = inner_y + cr + 1;
-        write!(buf, "\x1b[{};{}H", cursor_y, cursor_x)?;
-        // Show cursor
-        buf.extend_from_slice(b"\x1b[?25h");
-    }
-
     w.write_all(&buf)?;
+    w.flush()
+}
+
+/// Position the terminal cursor at the PTY app's cursor location and show it,
+/// but only if the PTY app itself wants the cursor visible.
+///
+/// Call this ONCE per frame, after all render_pty_direct calls, for the active pane.
+pub fn write_pty_cursor(
+    w: &mut impl Write,
+    screen: &vt100::Screen,
+    inner_x: u16,
+    inner_y: u16,
+) -> std::io::Result<()> {
+    if screen.hide_cursor() {
+        // PTY app (e.g. lazygit during render) wants cursor hidden — respect it
+        return Ok(());
+    }
+    let (cr, cc) = screen.cursor_position();
+    let cursor_x = inner_x + cc + 1;
+    let cursor_y = inner_y + cr + 1;
+    write!(w, "\x1b[{};{}H\x1b[?25h", cursor_y, cursor_x)?;
     w.flush()
 }
 

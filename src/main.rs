@@ -7,7 +7,7 @@ mod ui;
 mod workspace;
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -116,82 +116,111 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exit_action;
     let mut last_esc: Option<Instant> = None;
 
+    // Track whether PTY content needs re-rendering (dirty = new data or resize)
+    let mut pty_needs_render = false;
+
     loop {
         // Read PTY output before drawing (so display is up to date)
         if app.mode == Mode::Attached {
-            let should_detach = if let Some(ref mut pty) = app.pty_session {
-                pty.try_read();
-                !pty.is_running()
+            let (left_dirty, should_detach) = if let Some(ref mut pty) = app.pty_session {
+                let dirty = pty.try_read();
+                (dirty, !pty.is_running())
             } else {
-                true
+                (false, true)
             };
-            // Also read right pane
-            if let Some(ref mut pty_right) = app.pty_right {
-                pty_right.try_read();
+
+            let right_dirty = if let Some(ref mut pty_right) = app.pty_right {
+                let dirty = pty_right.try_read();
                 if !pty_right.is_running() {
-                    // Right pane died — detach both
                     app.detach_pty();
                     continue;
                 }
-            }
+                dirty
+            } else {
+                false
+            };
+
             if should_detach {
                 app.detach_pty();
             }
+
+            pty_needs_render = pty_needs_render || left_dirty || right_dirty;
         }
 
         terminal.draw(|f| ui::draw(f, &app))?;
 
         // Render PTY content directly to the terminal, bypassing ratatui/crossterm.
+        // Only re-render cells when PTY has new data or terminal was resized.
+        // Cursor is managed separately — positioned once per frame for the active pane.
         if app.mode == Mode::Attached {
             let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+
+            // Hide cursor once before any PTY rendering
+            write!(terminal.backend_mut(), "\x1b[?25l")?;
 
             if app.pty_right.is_some() {
                 // Two-pane mode
                 let (left_x, left_w, right_x, right_w, inner_y, inner_h) =
                     ui::two_pane_geometry(cols, rows);
 
-                if let Some(ref pty) = app.pty_session {
-                    let is_active = app.active_pane == Pane::Left;
-                    ui::render_pty_direct(
-                        terminal.backend_mut(),
-                        pty.screen(),
-                        left_x,
-                        inner_y,
-                        left_w,
-                        inner_h,
-                        is_active,
-                    )?;
+                if pty_needs_render {
+                    if let Some(ref pty) = app.pty_session {
+                        ui::render_pty_direct(
+                            terminal.backend_mut(),
+                            pty.screen(),
+                            left_x,
+                            inner_y,
+                            left_w,
+                            inner_h,
+                        )?;
+                    }
+                    if let Some(ref pty) = app.pty_right {
+                        ui::render_pty_direct(
+                            terminal.backend_mut(),
+                            pty.screen(),
+                            right_x,
+                            inner_y,
+                            right_w,
+                            inner_h,
+                        )?;
+                    }
                 }
-                if let Some(ref pty) = app.pty_right {
-                    let is_active = app.active_pane == Pane::Right;
-                    ui::render_pty_direct(
-                        terminal.backend_mut(),
-                        pty.screen(),
-                        right_x,
-                        inner_y,
-                        right_w,
-                        inner_h,
-                        is_active,
-                    )?;
+
+                // Position cursor at active pane (every frame for smooth cursor)
+                let (cursor_x, cursor_screen) = match app.active_pane {
+                    Pane::Left => (left_x, app.pty_session.as_ref().map(|p| p.screen())),
+                    Pane::Right => (right_x, app.pty_right.as_ref().map(|p| p.screen())),
+                };
+                if let Some(screen) = cursor_screen {
+                    ui::write_pty_cursor(terminal.backend_mut(), screen, cursor_x, inner_y)?;
                 }
             } else {
                 // Single pane
+                let inner_x = 1u16;
+                let inner_y = 1u16;
+                let inner_w = cols.saturating_sub(2);
+                let inner_h = rows.saturating_sub(3);
+
+                if pty_needs_render {
+                    if let Some(ref pty) = app.pty_session {
+                        ui::render_pty_direct(
+                            terminal.backend_mut(),
+                            pty.screen(),
+                            inner_x,
+                            inner_y,
+                            inner_w,
+                            inner_h,
+                        )?;
+                    }
+                }
+
+                // Position cursor (every frame)
                 if let Some(ref pty) = app.pty_session {
-                    let inner_x = 1u16;
-                    let inner_y = 1u16;
-                    let inner_w = cols.saturating_sub(2);
-                    let inner_h = rows.saturating_sub(3);
-                    ui::render_pty_direct(
-                        terminal.backend_mut(),
-                        pty.screen(),
-                        inner_x,
-                        inner_y,
-                        inner_w,
-                        inner_h,
-                        true,
-                    )?;
+                    ui::write_pty_cursor(terminal.backend_mut(), pty.screen(), inner_x, inner_y)?;
                 }
             }
+
+            pty_needs_render = false;
         }
 
         // Auto-clear stale status messages (only in list view)
@@ -266,6 +295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let (cols, rows) =
                                 crossterm::terminal::size().unwrap_or((80, 24));
                             app.attach_selected(rows, cols);
+                            pty_needs_render = true;
                         }
                         KeyCode::Char('c') => app.start_create(),
                         KeyCode::Char('n') => app.start_rename(),
@@ -347,6 +377,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Resize(cols, rows) => {
                     if app.mode == Mode::Attached {
                         app.resize_pty(rows, cols);
+                        pty_needs_render = true; // force re-render after resize
                     }
                 }
                 _ => {}

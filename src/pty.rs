@@ -45,7 +45,9 @@ impl PtySession {
     }
 
     /// Read any available output from the PTY (non-blocking).
-    pub fn try_read(&mut self) {
+    /// Returns `true` if any data was read (screen may have changed).
+    pub fn try_read(&mut self) -> bool {
+        let mut any = false;
         let mut buf = [0u8; 8192];
         loop {
             let n = unsafe {
@@ -57,10 +59,12 @@ impl PtySession {
             };
             if n > 0 {
                 self.parser.process(&buf[..n as usize]);
+                any = true;
             } else {
                 break;
             }
         }
+        any
     }
 
     /// Send input bytes to the PTY.
