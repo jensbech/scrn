@@ -32,12 +32,29 @@ scrn   # launch
 - Search and filter sessions with fuzzy matching
 - Embedded PTY display when attached
 - Shell integration for zsh and bash
+- Workspace mode with tree view and two-pane split
+
+## Workspace mode
+
+Point scrn at a directory of git repos and it displays them as a tree. Selecting a repo opens a two-pane split: left pane for the repo's Screen session, right pane for a companion session (e.g. editor + terminal side by side). Sessions are created automatically on first open and reattached on subsequent visits.
+
+Configure via `~/.config/scrn/config.toml`:
+
+```toml
+workspace = "~/projects"
+```
+
+Or pass it on the command line:
+
+```bash
+scrn -w ~/projects
+```
 
 ## Keybindings
 
-**Session list:** `j/k` navigate, `Enter` attach, `c` create, `n` rename, `x` kill, `d` go home, `/` search, `r` refresh, `?` legend, `q` quit
+**Session list:** `j/k` navigate, `g/G` top/bottom, `Enter` attach, `c` create, `x` kill, `X` kill all, `o` toggle opened filter, `d` go home, `/` search, `r` refresh, `?` legend, `q` quit
 
-**Attached:** `Esc Esc` detach, `Ctrl+A,D` standard Screen detach
+**Attached:** `Esc Esc` detach, `Ctrl+S` swap pane, `Ctrl+A,D` standard Screen detach
 
 ## Development
 

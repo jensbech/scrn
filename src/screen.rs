@@ -22,7 +22,6 @@ pub struct Session {
     pub name: String,
     pub pid_name: String,
     pub state: SessionState,
-    pub date: String,
 }
 
 /// Returns the path to scrn's managed screenrc, creating it if needed.
@@ -142,27 +141,10 @@ pub fn list_sessions() -> Result<Vec<Session>, String> {
             SessionState::Detached
         };
 
-        // Extract date from parentheses
-        let date = rest
-            .find('(')
-            .and_then(|start| {
-                rest[start + 1..].find(')').map(|end| {
-                    let d = &rest[start + 1..start + 1 + end];
-                    // Skip if it's just "Attached" or "Detached"
-                    if d == "Attached" || d == "Detached" {
-                        String::new()
-                    } else {
-                        d.to_string()
-                    }
-                })
-            })
-            .unwrap_or_default();
-
         sessions.push(Session {
             name: name.to_string(),
             pid_name: pid_name.to_string(),
             state,
-            date,
         });
     }
 

@@ -3,7 +3,10 @@ use std::io::Write;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Table, TableState,
+};
 use ratatui::Frame;
 
 use crate::app::{fuzzy_match, App, ListItem, Mode, Pane};
@@ -42,7 +45,7 @@ const DIM_BG: Color = Color::Rgb(10, 10, 15);
 const VERSION_FG: Color = Color::Rgb(80, 80, 100);
 const COUNT_FG: Color = Color::Rgb(100, 100, 120);
 const SECTION_FG: Color = Color::Rgb(140, 120, 180);
-const REPO_FG: Color = Color::Rgb(100, 200, 140);
+const REPO_FG: Color = Color::Rgb(180, 180, 200);
 const SEPARATOR_FG: Color = Color::Rgb(60, 60, 80);
 const ACTIVE_BORDER_FG: Color = Color::Rgb(100, 100, 140);
 
@@ -158,6 +161,18 @@ pub fn draw(f: &mut Frame, app: &App) {
             dim_background(f);
             draw_kill_modal(f, app);
         }
+        Mode::ConfirmKillAll1 => {
+            dim_background(f);
+            draw_kill_all_modal_1(f, app);
+        }
+        Mode::ConfirmKillAll2 => {
+            dim_background(f);
+            draw_kill_all_modal_2(f);
+        }
+        Mode::ConfirmQuit => {
+            dim_background(f);
+            draw_quit_modal(f);
+        }
         _ => {}
     }
 
@@ -200,7 +215,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     let header = Row::new(vec![
         Cell::from("Name"),
         Cell::from("State"),
-        Cell::from("Date"),
+        Cell::from("Last opened"),
     ])
     .style(header_style)
     .bottom_margin(1);
@@ -258,7 +273,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
 
                 let indent = "  ".repeat(*depth);
                 let prefix = format!("  {indent}");
-                let avail = name_chars.saturating_sub(prefix.chars().count() + 6); // room for (.git)
+                let avail = name_chars.saturating_sub(prefix.chars().count());
                 let name_text = truncate(name, avail);
                 let has_session = session.is_some();
                 let name_fg = if has_session { GREEN } else { REPO_FG };
@@ -294,24 +309,17 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                                 if current_is_match { match_style } else { normal_style };
                             spans.push(Span::styled(current, style));
                         }
-                        // Append (.git) tag
-                        spans.push(Span::styled(
-                            " (.git)",
-                            Style::default().fg(DIM).bg(bg),
-                        ));
                         Cell::from(Line::from(spans))
                     } else {
                         Cell::from(Line::from(vec![
                             Span::styled(prefix, Style::default().fg(name_fg).bg(bg)),
                             Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
-                            Span::styled(" (.git)", Style::default().fg(DIM).bg(bg)),
                         ]))
                     }
                 } else {
                     Cell::from(Line::from(vec![
                         Span::styled(prefix, Style::default().fg(name_fg).bg(bg)),
                         Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
-                        Span::styled(" (.git)", Style::default().fg(DIM).bg(bg)),
                     ]))
                 };
 
@@ -325,9 +333,8 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     (String::new(), DIM)
                 };
 
-                let date_text = session
-                    .as_ref()
-                    .map(|s| s.date.clone())
+                let date_text = app
+                    .last_opened(name)
                     .unwrap_or_default();
 
                 Row::new(vec![
@@ -419,7 +426,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                         Style::default().fg(state_color).bg(bg),
                     )),
                     Cell::from(Span::styled(
-                        session.date.clone(),
+                        app.last_opened(&session.name).unwrap_or_default(),
                         Style::default().fg(DIM).bg(bg),
                     )),
                 ])
@@ -434,7 +441,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(DATE_W),
     ];
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(BORDER_FG).bg(BASE_BG))
         .style(Style::default().fg(FG).bg(BASE_BG))
@@ -451,6 +458,13 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(VERSION_FG).bg(BASE_BG),
             ),
         ]));
+
+    if app.filter_opened {
+        block = block.title_bottom(Line::from(Span::styled(
+            " Showing: opened only ",
+            Style::default().fg(MATCH_FG).bg(BASE_BG),
+        )));
+    }
 
     if app.selectable_indices.is_empty() {
         let msg = if !app.search_input.is_empty() {
@@ -481,12 +495,25 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     .bg(HIGHLIGHT_BG)
                     .add_modifier(Modifier::BOLD),
             )
-            .highlight_symbol("\u{25b6} ");
+            .highlight_symbol("\u{2588} ");
 
         let mut state = TableState::default();
         state.select(selected_visual_row);
 
         f.render_stateful_widget(table, area, &mut state);
+
+        // Scrollbar
+        let visible_rows = area.height.saturating_sub(4) as usize; // borders + header + header margin
+        if app.selectable_indices.len() > visible_rows {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(Style::default().fg(ACCENT))
+                .track_style(Style::default().fg(Color::Rgb(40, 40, 60)));
+            let mut scrollbar_state = ScrollbarState::new(app.selectable_indices.len())
+                .position(app.selected);
+            f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+        }
     }
 }
 
@@ -541,9 +568,12 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
                     .fg(FG_BRIGHT)
                     .add_modifier(Modifier::BOLD),
             ),
-            format!(
-                " q:Quit  j/k:Nav  Enter:Attach  c:Create  n:Rename  x:Kill{home_hint}  /:Search  r:Refresh  ?:Legend "
-            ),
+            {
+                let filter_hint = if app.filter_opened { "  o:All" } else { "  o:Opened" };
+                format!(
+                    " q:Quit  j/k:Nav  g/G:Top/Bot  Enter:Attach  c:Create  x:Kill{home_hint}  /:Search{filter_hint}  ?:Legend "
+                )
+            },
         ),
         Mode::Searching => (
             Span::styled(
@@ -572,9 +602,13 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 hint.to_string(),
             )
         }
-        Mode::ConfirmKill => (
+        Mode::ConfirmKill | Mode::ConfirmKillAll1 | Mode::ConfirmKillAll2 | Mode::ConfirmQuit => (
             Span::styled(
-                " KILL ",
+                match app.mode {
+                    Mode::ConfirmKill => " KILL ",
+                    Mode::ConfirmKillAll1 | Mode::ConfirmKillAll2 => " KILL ALL ",
+                    _ => " QUIT ",
+                },
                 Style::default()
                     .bg(MODE_KILL_BG)
                     .fg(FG_BRIGHT)
@@ -749,6 +783,137 @@ fn draw_kill_modal(f: &mut Frame, app: &App) {
 
     f.render_widget(
         Paragraph::new(lines).style(Style::default().fg(FG).bg(KILL_BG)),
+        inner,
+    );
+}
+
+// ── Kill-all confirmation modals ─────────────────────────────
+
+fn draw_kill_all_modal_1(f: &mut Frame, app: &App) {
+    let count = app.all_sessions.len();
+    let area = f.area();
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(KILL_BORDER).bg(KILL_BG))
+        .style(Style::default().fg(FG).bg(KILL_BG))
+        .title(Span::styled(
+            " Kill All Sessions ",
+            Style::default()
+                .fg(KILL_TITLE)
+                .bg(KILL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" Kill all {count} sessions?"),
+            Style::default().fg(FG_BRIGHT).bg(KILL_BG),
+        )),
+        Line::from(Span::styled(
+            " y/Enter: confirm  n/Esc: cancel",
+            Style::default().fg(DIM).bg(KILL_BG),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(KILL_BG)),
+        inner,
+    );
+}
+
+fn draw_kill_all_modal_2(f: &mut Frame) {
+    let area = f.area();
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(KILL_BORDER).bg(KILL_BG))
+        .style(Style::default().fg(FG).bg(KILL_BG))
+        .title(Span::styled(
+            " Are you sure? ",
+            Style::default()
+                .fg(KILL_TITLE)
+                .bg(KILL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            " This cannot be undone.",
+            Style::default().fg(FG_BRIGHT).bg(KILL_BG),
+        )),
+        Line::from(Span::styled(
+            " y/Enter: kill all  n/Esc: cancel",
+            Style::default().fg(DIM).bg(KILL_BG),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(KILL_BG)),
+        inner,
+    );
+}
+
+// ── Quit confirmation modal ──────────────────────────────────
+
+fn draw_quit_modal(f: &mut Frame) {
+    let area = f.area();
+    let width = 40u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            " Quit ",
+            Style::default()
+                .fg(MODAL_TITLE)
+                .bg(MODAL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            " Quit scrn?",
+            Style::default().fg(FG_BRIGHT).bg(MODAL_BG),
+        )),
+        Line::from(Span::styled(
+            " y/Enter: confirm  n/Esc: cancel",
+            Style::default().fg(DIM).bg(MODAL_BG),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
         inner,
     );
 }
@@ -947,7 +1112,7 @@ fn draw_attached(f: &mut Frame, app: &App) {
                 Style::default().fg(FG_BRIGHT).bg(BASE_BG),
             ),
             Span::styled(
-                " F6:Swap Pane  Esc Esc:Back ",
+                " Ctrl+S:Swap Pane  Esc Esc:Back ",
                 Style::default().fg(HELP_FG).bg(BASE_BG),
             ),
         ]);

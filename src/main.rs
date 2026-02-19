@@ -295,8 +295,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     pty.write_all(&[0x1b]);
                                 }
                             }
-                        } else if key.code == KeyCode::F(6) {
-                            // F6 — swap active pane
+                        } else if key.code == KeyCode::F(6)
+                            || (key.code == KeyCode::Char('s')
+                                && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL))
+                        {
+                            // F6 / Ctrl+S — swap active pane
                             last_esc = None;
                             app.swap_pane();
                             ui_needs_draw = true;
@@ -314,12 +317,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     Mode::Normal => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            exit_action = Action::None;
-                            break;
+                        KeyCode::Esc => {
+                            if !app.search_input.is_empty() {
+                                app.clear_search();
+                            } else {
+                                app.mode = Mode::ConfirmQuit;
+                            }
+                        }
+                        KeyCode::Char('q') => {
+                            app.mode = Mode::ConfirmQuit;
                         }
                         KeyCode::Up | KeyCode::Char('k') => app.move_up(),
                         KeyCode::Down | KeyCode::Char('j') => app.move_down(),
+                        KeyCode::Char('g') => app.move_to_top(),
+                        KeyCode::Char('G') => app.move_to_bottom(),
+                        KeyCode::Char('o') => app.toggle_opened_filter(),
                         KeyCode::Enter => {
                             let (cols, rows) =
                                 crossterm::terminal::size().unwrap_or((80, 24));
@@ -332,6 +344,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('c') => app.start_create(),
                         KeyCode::Char('n') => app.start_rename(),
                         KeyCode::Char('x') => app.start_kill(),
+                        KeyCode::Char('X') => app.start_kill_all(),
                         KeyCode::Char('d') => app.go_home(),
                         KeyCode::Char('/') => app.start_search(),
                         KeyCode::Char('r') => app.refresh_sessions(),
@@ -398,6 +411,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Mode::ConfirmKill => match key.code {
                         KeyCode::Char('y') | KeyCode::Enter => app.confirm_kill(),
                         KeyCode::Char('n') | KeyCode::Esc => app.cancel_kill(),
+                        _ => {}
+                    },
+                    Mode::ConfirmKillAll1 => match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => app.confirm_kill_all_step1(),
+                        KeyCode::Char('n') | KeyCode::Esc => app.cancel_kill_all(),
+                        _ => {}
+                    },
+                    Mode::ConfirmKillAll2 => match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => app.confirm_kill_all_step2(),
+                        KeyCode::Char('n') | KeyCode::Esc => app.cancel_kill_all(),
+                        _ => {}
+                    },
+                    Mode::ConfirmQuit => match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => {
+                            exit_action = Action::None;
+                            break;
+                        }
+                        KeyCode::Char('n') | KeyCode::Esc => {
+                            app.mode = Mode::Normal;
+                        }
                         _ => {}
                     },
                 },

@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::pty::PtySession;
 use crate::screen::{self, Session};
@@ -12,6 +13,9 @@ pub enum Mode {
     Creating,
     Renaming,
     ConfirmKill,
+    ConfirmKillAll1,
+    ConfirmKillAll2,
+    ConfirmQuit,
     Attached,
 }
 
@@ -67,6 +71,9 @@ pub struct App {
     pub display_items: Vec<ListItem>,
     pub selectable_indices: Vec<usize>,
     pub kill_session_info: Option<(String, String)>,
+    /// session name -> unix timestamp of last attach
+    pub history: HashMap<String, u64>,
+    pub filter_opened: bool,
 }
 
 impl App {
@@ -96,6 +103,8 @@ impl App {
             display_items: Vec::new(),
             selectable_indices: Vec::new(),
             kill_session_info: None,
+            history: load_history(),
+            filter_opened: false,
         }
     }
 
@@ -129,6 +138,21 @@ impl App {
         if !self.selectable_indices.is_empty() && self.selected < self.selectable_indices.len() - 1 {
             self.selected += 1;
         }
+    }
+
+    pub fn move_to_top(&mut self) {
+        self.selected = 0;
+    }
+
+    pub fn move_to_bottom(&mut self) {
+        if !self.selectable_indices.is_empty() {
+            self.selected = self.selectable_indices.len() - 1;
+        }
+    }
+
+    pub fn toggle_opened_filter(&mut self) {
+        self.filter_opened = !self.filter_opened;
+        self.rebuild_display_list();
     }
 
     pub fn start_search(&mut self) {
@@ -216,6 +240,70 @@ impl App {
             }
         }
 
+        // Apply "opened only" filter
+        if self.filter_opened {
+            let history = &self.history;
+            let mut filtered_items = Vec::new();
+            let mut filtered_indices = Vec::new();
+            for (i, item) in self.display_items.iter().enumerate() {
+                match item {
+                    ListItem::TreeRepo { name, .. } => {
+                        if history.contains_key(name.as_str()) {
+                            filtered_indices.push(filtered_items.len());
+                            filtered_items.push(item.clone());
+                        }
+                    }
+                    ListItem::SessionItem(session) => {
+                        if history.contains_key(session.name.as_str()) {
+                            filtered_indices.push(filtered_items.len());
+                            filtered_items.push(item.clone());
+                        }
+                    }
+                    ListItem::TreeDir { .. } | ListItem::SectionHeader(_) => {
+                        // Keep dirs/headers only if selectable items follow;
+                        // we'll prune empty ones in a second pass
+                        if self.selectable_indices.contains(&i) {
+                            // This shouldn't happen for dirs, but just in case
+                            filtered_indices.push(filtered_items.len());
+                        }
+                        filtered_items.push(item.clone());
+                    }
+                }
+            }
+            // Prune trailing non-selectable items (empty dirs/headers)
+            // Walk backwards and remove any dir/header that has no selectable item after it
+            let mut keep = vec![false; filtered_items.len()];
+            let selectable_set: std::collections::HashSet<usize> =
+                filtered_indices.iter().copied().collect();
+            let mut seen_selectable = false;
+            for i in (0..filtered_items.len()).rev() {
+                if selectable_set.contains(&i) {
+                    seen_selectable = true;
+                    keep[i] = true;
+                } else {
+                    // dir/header: keep only if a selectable follows
+                    keep[i] = seen_selectable;
+                    if !seen_selectable {
+                        // Reset for next group
+                    }
+                    if matches!(filtered_items[i], ListItem::SectionHeader(_)) {
+                        seen_selectable = false;
+                    }
+                }
+            }
+            // Rebuild with only kept items
+            self.display_items.clear();
+            self.selectable_indices.clear();
+            for (i, item) in filtered_items.into_iter().enumerate() {
+                if keep[i] {
+                    if selectable_set.contains(&i) {
+                        self.selectable_indices.push(self.display_items.len());
+                    }
+                    self.display_items.push(item);
+                }
+            }
+        }
+
         if self.selected >= self.selectable_indices.len() {
             self.selected = self.selectable_indices.len().saturating_sub(1);
         }
@@ -251,6 +339,7 @@ impl App {
             Ok(pty) => {
                 self.pty_session = Some(pty);
                 self.attached_name = name.to_string();
+                self.record_opened(name);
                 self.mode = Mode::Attached;
             }
             Err(e) => {
@@ -329,6 +418,7 @@ impl App {
         self.attached_name = name.to_string();
         self.attached_right_name = right_name;
         self.active_pane = Pane::Left;
+        self.record_opened(name);
         self.mode = Mode::Attached;
     }
 
@@ -365,6 +455,7 @@ impl App {
                     ) {
                         Ok(pty) => {
                             self.pty_session = Some(pty);
+                            self.record_opened(&name);
                             self.attached_name = name;
                             self.mode = Mode::Attached;
                         }
@@ -502,8 +593,17 @@ impl App {
     }
 
     pub fn start_kill(&mut self) {
-        if let Some(ListItem::SessionItem(session)) = self.selected_display_item() {
-            self.kill_session_info = Some((session.name.clone(), session.pid_name.clone()));
+        let info = match self.selected_display_item() {
+            Some(ListItem::SessionItem(session)) => {
+                Some((session.name.clone(), session.pid_name.clone()))
+            }
+            Some(ListItem::TreeRepo { session: Some(session), .. }) => {
+                Some((session.name.clone(), session.pid_name.clone()))
+            }
+            _ => None,
+        };
+        if let Some(info) = info {
+            self.kill_session_info = Some(info);
             self.mode = Mode::ConfirmKill;
         }
     }
@@ -528,6 +628,41 @@ impl App {
         self.mode = Mode::Normal;
     }
 
+    pub fn start_kill_all(&mut self) {
+        if !self.all_sessions.is_empty() {
+            self.mode = Mode::ConfirmKillAll1;
+        }
+    }
+
+    pub fn confirm_kill_all_step1(&mut self) {
+        self.mode = Mode::ConfirmKillAll2;
+    }
+
+    pub fn confirm_kill_all_step2(&mut self) {
+        let mut killed = 0;
+        let mut errors = Vec::new();
+        for session in self.all_sessions.clone() {
+            if self.is_current_session(&session) {
+                continue;
+            }
+            match screen::kill_session(&session.pid_name) {
+                Ok(()) => killed += 1,
+                Err(e) => errors.push(e),
+            }
+        }
+        if errors.is_empty() {
+            self.set_status(format!("Killed {killed} sessions"));
+        } else {
+            self.set_status(format!("Killed {killed}, {} errors", errors.len()));
+        }
+        self.refresh_sessions();
+        self.mode = Mode::Normal;
+    }
+
+    pub fn cancel_kill_all(&mut self) {
+        self.mode = Mode::Normal;
+    }
+
     pub fn go_home(&mut self) {
         if self.current_session.is_some() {
             self.action = Action::GoHome;
@@ -538,6 +673,25 @@ impl App {
         self.current_session
             .as_ref()
             .is_some_and(|current| *current == session.pid_name)
+    }
+
+    fn record_opened(&mut self, name: &str) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.history.insert(name.to_string(), ts);
+        save_history(&self.history);
+    }
+
+    /// Format the last-opened time for display, returning None if never opened.
+    pub fn last_opened(&self, name: &str) -> Option<String> {
+        let ts = *self.history.get(name)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Some(format_relative(now, ts))
     }
 }
 
@@ -640,6 +794,62 @@ fn tree_has_match(node: &TreeNode, query: &str) -> bool {
         }
     }
     false
+}
+
+fn history_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("scrn")
+        .join("history")
+}
+
+fn load_history() -> HashMap<String, u64> {
+    let path = history_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let mut map = HashMap::new();
+    for line in contents.lines() {
+        if let Some((name, ts_str)) = line.split_once('\t') {
+            if let Ok(ts) = ts_str.parse::<u64>() {
+                map.insert(name.to_string(), ts);
+            }
+        }
+    }
+    map
+}
+
+fn save_history(history: &HashMap<String, u64>) {
+    let path = history_path();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let mut lines: Vec<String> = history
+        .iter()
+        .map(|(name, ts)| format!("{name}\t{ts}"))
+        .collect();
+    lines.sort();
+    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+}
+
+fn format_relative(now: u64, ts: u64) -> String {
+    let delta = now.saturating_sub(ts);
+    if delta < 60 {
+        "just now".to_string()
+    } else if delta < 3600 {
+        let m = delta / 60;
+        if m == 1 { "1 min ago".to_string() } else { format!("{m} mins ago") }
+    } else if delta < 86400 {
+        let h = delta / 3600;
+        if h == 1 { "1 hour ago".to_string() } else { format!("{h} hours ago") }
+    } else if delta < 86400 * 30 {
+        let d = delta / 86400;
+        if d == 1 { "1 day ago".to_string() } else { format!("{d} days ago") }
+    } else {
+        let d = delta / 86400;
+        let m = d / 30;
+        if m == 1 { "1 month ago".to_string() } else { format!("{m} months ago") }
+    }
 }
 
 pub fn fuzzy_match(haystack: &str, needle: &str) -> Option<Vec<usize>> {
