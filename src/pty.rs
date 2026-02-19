@@ -62,7 +62,7 @@ impl PtySession {
                 .spawn()?
         };
 
-        let parser = vt100::Parser::new(rows, cols, 0);
+        let parser = vt100::Parser::new(rows, cols, 10000);
         Ok(Self {
             master,
             child,
@@ -121,6 +121,26 @@ impl PtySession {
     /// Get the current terminal screen state.
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
+    }
+
+    /// Set the scrollback offset (0 = live view, >0 = scrolled back).
+    pub fn set_scrollback(&mut self, offset: usize) {
+        self.parser.set_scrollback(offset);
+    }
+
+    /// Current scrollback offset (0 = live view).
+    pub fn scrollback_offset(&self) -> usize {
+        self.parser.screen().scrollback()
+    }
+
+    /// Total number of scrollback rows available.
+    #[allow(dead_code)]
+    pub fn scrollback_available(&mut self) -> usize {
+        let current = self.parser.screen().scrollback();
+        self.parser.set_scrollback(usize::MAX);
+        let available = self.parser.screen().scrollback();
+        self.parser.set_scrollback(current);
+        available
     }
 
     /// Raw file descriptor for the PTY master (for multiplexed poll).

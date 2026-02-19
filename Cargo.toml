@@ -1,6 +1,6 @@
 [package]
 name = "scrn"
-version = "2.4.0"
+version = "2.5.0"
 edition = "2021"
 authors = ["Jens Bech-Sørensen"]
 license = "MIT"
@@ -12,6 +12,9 @@ ratatui = "0.29"
 crossterm = "0.28"
 vt100 = "0.15"
 libc = "0.2"
+
+[patch.crates-io]
+vt100 = { path = "vt100-patch" }
 
 [profile.release]
 opt-level = 3

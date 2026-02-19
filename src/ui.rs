@@ -1112,7 +1112,7 @@ fn draw_attached(f: &mut Frame, app: &App) {
                 Style::default().fg(FG_BRIGHT).bg(BASE_BG),
             ),
             Span::styled(
-                " Ctrl+S:Swap Pane  Esc Esc:Back ",
+                " Ctrl+S:Swap  Ctrl+E/N:Scroll  Esc Esc:Back ",
                 Style::default().fg(HELP_FG).bg(BASE_BG),
             ),
         ]);
@@ -1134,7 +1134,7 @@ fn draw_attached(f: &mut Frame, app: &App) {
                 Style::default().fg(FG_BRIGHT).bg(BASE_BG),
             ),
             Span::styled(
-                " Esc Esc:Back  Ctrl+A,D:Detach ",
+                " Ctrl+E/N:Scroll  Esc Esc:Back ",
                 Style::default().fg(HELP_FG).bg(BASE_BG),
             ),
         ]);
@@ -1337,8 +1337,8 @@ pub fn write_pty_cursor(
     w.write_all(&buf)
 }
 
-#[derive(PartialEq)]
-struct CellStyle {
+#[derive(PartialEq, Clone)]
+pub struct CellStyle {
     fg: vt100::Color,
     bg: vt100::Color,
     bold: bool,
@@ -1426,4 +1426,71 @@ fn write_color(buf: &mut Vec<u8>, color: vt100::Color, is_fg: bool) {
             push_u8(buf, b);
         }
     }
+}
+
+/// Render a scrollbar on the right edge of the pane when scrolled back.
+/// The scrollbar overlays the rightmost column of the content area.
+pub fn render_scrollbar(
+    w: &mut impl Write,
+    scroll_offset: usize,
+    total_scrollback: usize,
+    inner_x: u16,
+    inner_y: u16,
+    inner_w: u16,
+    inner_h: u16,
+) -> std::io::Result<()> {
+    if total_scrollback == 0 || inner_h < 2 || inner_w < 2 {
+        return Ok(());
+    }
+
+    let track_height = inner_h as usize;
+    let total_content = total_scrollback + inner_h as usize;
+
+    // Thumb size: proportional to viewport vs total content, at least 1
+    let thumb_size = ((track_height * track_height) / total_content).max(1);
+
+    // Position: scroll_offset=0 → thumb at bottom (live), scroll_offset=max → thumb at top
+    let max_scroll = total_scrollback;
+    let scroll_fraction = if max_scroll > 0 {
+        scroll_offset as f64 / max_scroll as f64
+    } else {
+        0.0
+    };
+
+    let max_thumb_pos = track_height.saturating_sub(thumb_size);
+    let thumb_top = ((1.0 - scroll_fraction) * max_thumb_pos as f64) as usize;
+
+    let x = inner_x + inner_w; // rightmost column (overlays border)
+    let mut buf = Vec::with_capacity(track_height * 16);
+
+    for i in 0..track_height {
+        push_cup(&mut buf, inner_y + i as u16 + 1, x);
+        if i >= thumb_top && i < thumb_top + thumb_size {
+            // Thumb: bright block
+            buf.extend_from_slice(b"\x1b[0;38;2;140;140;200m\xe2\x96\x88"); // █
+        } else {
+            // Track: dim line
+            buf.extend_from_slice(b"\x1b[0;38;2;40;40;60m\xe2\x94\x82"); // │
+        }
+    }
+    buf.extend_from_slice(b"\x1b[0m");
+
+    // Line position indicator at top-right of content area
+    let mut label = Vec::with_capacity(32);
+    label.extend_from_slice(b" [");
+    push_u16(&mut label, scroll_offset as u16);
+    label.push(b'/');
+    push_u16(&mut label, total_scrollback as u16);
+    label.extend_from_slice(b"] ");
+
+    let len = label.len() as u16;
+    if len < inner_w {
+        let lx = inner_x + inner_w - len;
+        push_cup(&mut buf, inner_y + 1, lx + 1);
+        buf.extend_from_slice(b"\x1b[0;7m"); // reverse video
+        buf.extend_from_slice(&label);
+        buf.extend_from_slice(b"\x1b[0m");
+    }
+
+    w.write_all(&buf)
 }
