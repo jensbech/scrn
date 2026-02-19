@@ -147,16 +147,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pty_needs_render = pty_needs_render || left_dirty || right_dirty;
         }
 
+        // Begin synchronized output + hide cursor before any rendering.
+        // The terminal buffers all writes until the end marker, then renders
+        // the entire frame atomically — no intermediate states visible.
+        if app.mode == Mode::Attached {
+            write!(terminal.backend_mut(), "\x1b[?2026h\x1b[?25l")?;
+        }
+
         terminal.draw(|f| ui::draw(f, &app))?;
 
         // Render PTY content directly to the terminal, bypassing ratatui/crossterm.
-        // Only re-render cells when PTY has new data or terminal was resized.
-        // Cursor is managed separately — positioned once per frame for the active pane.
         if app.mode == Mode::Attached {
             let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-
-            // Hide cursor once before any PTY rendering
-            write!(terminal.backend_mut(), "\x1b[?25l")?;
 
             if app.pty_right.is_some() {
                 // Two-pane mode
@@ -220,6 +222,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            // End synchronized output — terminal renders the whole frame at once
+            write!(terminal.backend_mut(), "\x1b[?2026l")?;
+            terminal.backend_mut().flush()?;
             pty_needs_render = false;
         }
 

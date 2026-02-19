@@ -2,6 +2,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -26,6 +27,8 @@ impl PtySession {
                 .args(args)
                 .env("TERM", "xterm-256color")
                 .env("COLORTERM", "truecolor")
+                .env_remove("STY")
+                .env_remove("WINDOW")
                 .stdin(Stdio::from_raw_fd(slave_raw))
                 .stdout(Stdio::from_raw_fd(dup1))
                 .stderr(Stdio::from_raw_fd(dup2))
@@ -100,6 +103,23 @@ impl PtySession {
 
 impl Drop for PtySession {
     fn drop(&mut self) {
+        // Already exited (e.g. after screen detach) — just reap
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        // SIGTERM for graceful shutdown (lets screen clean up its socket)
+        unsafe {
+            libc::kill(self.child.id() as i32, libc::SIGTERM);
+        }
+        // Brief wait for clean exit
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while Instant::now() < deadline {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Force kill as last resort
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

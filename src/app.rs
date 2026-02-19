@@ -247,9 +247,8 @@ impl App {
         let pty_rows = term_rows.saturating_sub(3);
         let pty_cols = term_cols.saturating_sub(2);
         let rc = crate::screen::ensure_screenrc();
-        match PtySession::spawn("screen", &["-c", &rc, "-r", pid_name], pty_rows, pty_cols) {
+        match PtySession::spawn("screen", &["-c", &rc, "-d", "-r", pid_name], pty_rows, pty_cols) {
             Ok(pty) => {
-                pty.write_all(b"\x0c");
                 self.pty_session = Some(pty);
                 self.attached_name = name.to_string();
                 self.mode = Mode::Attached;
@@ -317,9 +316,8 @@ impl App {
         let rc = crate::screen::ensure_screenrc();
 
         // Spawn left PTY
-        match PtySession::spawn("screen", &["-c", &rc, "-r", &left_pid], pty_rows, left_cols) {
+        match PtySession::spawn("screen", &["-c", &rc, "-d", "-r", &left_pid], pty_rows, left_cols) {
             Ok(pty) => {
-                pty.write_all(b"\x0c");
                 self.pty_session = Some(pty);
             }
             Err(e) => {
@@ -329,9 +327,8 @@ impl App {
         }
 
         // Spawn right PTY
-        match PtySession::spawn("screen", &["-c", &rc, "-r", &right_pid], pty_rows, right_cols) {
+        match PtySession::spawn("screen", &["-c", &rc, "-d", "-r", &right_pid], pty_rows, right_cols) {
             Ok(pty) => {
-                pty.write_all(b"\x0c");
                 self.pty_right = Some(pty);
             }
             Err(e) => {
@@ -398,8 +395,19 @@ impl App {
         if let Some(ref pty) = self.pty_right {
             pty.write_all(b"\x01d");
         }
-        // Small delay for screen to process detach
-        std::thread::sleep(Duration::from_millis(50));
+        // Wait for screen clients to exit cleanly (with timeout)
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
+            let left_done = self
+                .pty_session
+                .as_mut()
+                .map_or(true, |p| !p.is_running());
+            let right_done = self.pty_right.as_mut().map_or(true, |p| !p.is_running());
+            if left_done && right_done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
         self.pty_session = None;
         self.pty_right = None;

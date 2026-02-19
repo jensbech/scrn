@@ -1063,8 +1063,7 @@ pub fn render_pty_direct(
     }
 
     buf.extend_from_slice(b"\x1b[0m");
-    w.write_all(&buf)?;
-    w.flush()
+    w.write_all(&buf)
 }
 
 /// Position the terminal cursor at the PTY app's cursor location and show it,
@@ -1084,8 +1083,7 @@ pub fn write_pty_cursor(
     let (cr, cc) = screen.cursor_position();
     let cursor_x = inner_x + cc + 1;
     let cursor_y = inner_y + cr + 1;
-    write!(w, "\x1b[{};{}H\x1b[?25h", cursor_y, cursor_x)?;
-    w.flush()
+    write!(w, "\x1b[{};{}H\x1b[?25h", cursor_y, cursor_x)
 }
 
 #[derive(PartialEq)]
