@@ -174,14 +174,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let right_dirty = if let Some(ref mut pty_right) = app.pty_right {
                 let dirty = pty_right.try_read();
                 if !pty_right.is_running() {
-                    prev_screen_left = None;
+                    // Right pane died — drop it and continue with left pane only
+                    app.pty_right = None;
+                    app.attached_right_name.clear();
                     prev_screen_right = None;
-                    scroll_offset_left = 0;
                     scroll_offset_right = 0;
-                    app.detach_pty();
-                    continue;
+                    prev_screen_left = None; // force full redraw
+                    ui_needs_draw = true;
+                    false
+                } else {
+                    dirty
                 }
-                dirty
             } else {
                 false
             };
