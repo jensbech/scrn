@@ -1,9 +1,9 @@
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::pty::PtySession;
 use crate::screen::{self, Session};
-use crate::workspace::{self, RepoEntry};
+use crate::workspace::{self, TreeNode};
 
 #[derive(PartialEq)]
 pub enum Mode {
@@ -20,11 +20,26 @@ pub enum Action {
     None,
 }
 
+#[derive(PartialEq, Clone, Copy)]
+pub enum Pane {
+    Left,
+    Right,
+}
+
 #[derive(Clone)]
 pub enum ListItem {
     SectionHeader(String),
     SessionItem(Session),
-    RepoItem(RepoEntry),
+    TreeDir {
+        name: String,
+        depth: usize,
+    },
+    TreeRepo {
+        name: String,
+        path: PathBuf,
+        depth: usize,
+        session: Option<Session>,
+    },
 }
 
 pub struct App {
@@ -42,10 +57,13 @@ pub struct App {
     pub action: Action,
     pub show_legend: bool,
     pub pty_session: Option<PtySession>,
+    pub pty_right: Option<PtySession>,
+    pub active_pane: Pane,
     pub attached_name: String,
+    pub attached_right_name: String,
     pub rename_pid_name: String,
     pub workspace_dir: Option<PathBuf>,
-    pub workspace_repos: Vec<RepoEntry>,
+    pub workspace_tree: Option<TreeNode>,
     pub display_items: Vec<ListItem>,
     pub selectable_indices: Vec<usize>,
     pub kill_session_info: Option<(String, String)>,
@@ -53,7 +71,6 @@ pub struct App {
 
 impl App {
     pub fn new(action_file: Option<String>, workspace: Option<PathBuf>) -> Self {
-        let current_session = std::env::var("STY").ok();
         Self {
             sessions: Vec::new(),
             all_sessions: Vec::new(),
@@ -64,15 +81,18 @@ impl App {
             cursor_pos: 0,
             status_msg: String::new(),
             status_set_at: Instant::now(),
-            current_session,
+            current_session: std::env::var("STY").ok(),
             action_file,
             action: Action::None,
             show_legend: false,
             pty_session: None,
+            pty_right: None,
+            active_pane: Pane::Left,
             attached_name: String::new(),
+            attached_right_name: String::new(),
             rename_pid_name: String::new(),
             workspace_dir: workspace,
-            workspace_repos: Vec::new(),
+            workspace_tree: None,
             display_items: Vec::new(),
             selectable_indices: Vec::new(),
             kill_session_info: None,
@@ -89,7 +109,7 @@ impl App {
             }
         }
         if let Some(ref dir) = self.workspace_dir {
-            self.workspace_repos = workspace::scan_repos(dir);
+            self.workspace_tree = Some(workspace::scan_tree(dir));
         }
         self.apply_search_filter();
     }
@@ -143,82 +163,55 @@ impl App {
         self.display_items.clear();
         self.selectable_indices.clear();
 
-        // Filter repos: exclude those whose name matches an existing session name,
-        // and apply search filter
-        let session_names: std::collections::HashSet<&str> =
-            self.sessions.iter().map(|s| s.name.as_str()).collect();
+        // Clone sessions to avoid borrow conflicts
+        let sessions_clone: Vec<Session> = self.sessions.clone();
+        let session_map: std::collections::HashMap<&str, &Session> =
+            sessions_clone.iter().map(|s| (s.name.as_str(), s)).collect();
 
-        let filtered_repos: Vec<&RepoEntry> = self
-            .workspace_repos
+        let mut merged_sessions: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        if let Some(ref tree) = self.workspace_tree {
+            let tree = tree.clone();
+            if self.search_input.is_empty() {
+                flatten_tree(
+                    &tree,
+                    0,
+                    &session_map,
+                    &mut merged_sessions,
+                    &mut self.display_items,
+                    &mut self.selectable_indices,
+                );
+            } else {
+                let query = self.search_input.clone();
+                flatten_filtered(
+                    &tree,
+                    0,
+                    &query,
+                    &session_map,
+                    &mut merged_sessions,
+                    &mut self.display_items,
+                    &mut self.selectable_indices,
+                );
+            }
+        }
+
+        // Orphan sessions: not merged into any tree repo, and not a *-2 pane session
+        let orphan_sessions: Vec<&Session> = sessions_clone
             .iter()
-            .filter(|r| {
-                if session_names.contains(r.name.as_str()) {
-                    return false;
-                }
-                if self.search_input.is_empty() {
-                    true
-                } else {
-                    fuzzy_match(&r.name, &self.search_input).is_some()
-                }
+            .filter(|s| {
+                !merged_sessions.contains(&s.name)
+                    && !s.name.ends_with("-2")
             })
             .collect();
 
-        let has_sessions = !self.sessions.is_empty();
-        let has_repos = !filtered_repos.is_empty();
-        let searching = !self.search_input.is_empty();
-
-        if has_sessions && has_repos && !searching {
+        if !orphan_sessions.is_empty() {
             self.display_items
                 .push(ListItem::SectionHeader("Sessions".to_string()));
-        }
-        for session in &self.sessions {
-            let idx = self.display_items.len();
-            self.display_items
-                .push(ListItem::SessionItem(session.clone()));
-            self.selectable_indices.push(idx);
-        }
-
-        if searching {
-            // Flat list when searching — no group headers
-            for repo in &filtered_repos {
+            for session in orphan_sessions {
                 let idx = self.display_items.len();
                 self.display_items
-                    .push(ListItem::RepoItem((*repo).clone()));
-                self.selectable_indices.push(idx);
-            }
-        } else {
-            // Group repos by their group field, emitting a header per group
-            let mut current_group: Option<&str> = None;
-            for repo in &filtered_repos {
-                if current_group != Some(&repo.group) {
-                    current_group = Some(&repo.group);
-                    let header = if repo.group.is_empty() {
-                        // Repos directly under workspace root
-                        if has_sessions {
-                            "Workspaces".to_string()
-                        } else {
-                            // Only show group headers when there are multiple groups
-                            let has_multiple_groups = filtered_repos
-                                .iter()
-                                .any(|r| r.group != filtered_repos[0].group);
-                            if has_multiple_groups {
-                                "Workspaces".to_string()
-                            } else {
-                                // Single group with no sessions — skip header
-                                String::new()
-                            }
-                        }
-                    } else {
-                        repo.group.clone()
-                    };
-                    if !header.is_empty() {
-                        self.display_items
-                            .push(ListItem::SectionHeader(header));
-                    }
-                }
-                let idx = self.display_items.len();
-                self.display_items
-                    .push(ListItem::RepoItem((*repo).clone()));
+                    .push(ListItem::SessionItem(session.clone()));
                 self.selectable_indices.push(idx);
             }
         }
@@ -267,6 +260,93 @@ impl App {
         }
     }
 
+    fn attach_two_pane(
+        &mut self,
+        name: &str,
+        path: &std::path::Path,
+        term_rows: u16,
+        term_cols: u16,
+    ) {
+        let right_name = format!("{name}-2");
+
+        // Ensure left session exists
+        let left_exists = self.all_sessions.iter().any(|s| s.name == name);
+        if !left_exists {
+            if let Err(e) = screen::create_session_in_dir(name, path) {
+                self.set_status(format!("Error: {e}"));
+                return;
+            }
+        }
+
+        // Ensure right session exists
+        let right_exists = self.all_sessions.iter().any(|s| s.name == right_name);
+        if !right_exists {
+            if let Err(e) = screen::create_session_in_dir(&right_name, path) {
+                self.set_status(format!("Error: {e}"));
+                return;
+            }
+        }
+
+        // Re-read sessions to get pid_names
+        if let Ok(sessions) = screen::list_sessions() {
+            self.all_sessions = sessions;
+        }
+
+        let left_pid = self
+            .all_sessions
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.pid_name.clone());
+        let right_pid = self
+            .all_sessions
+            .iter()
+            .find(|s| s.name == right_name)
+            .map(|s| s.pid_name.clone());
+
+        let (Some(left_pid), Some(right_pid)) = (left_pid, right_pid) else {
+            self.set_status("Failed to find sessions after creation".to_string());
+            return;
+        };
+
+        let pty_rows = term_rows.saturating_sub(3);
+        let total_inner_cols = term_cols.saturating_sub(2);
+        // 60/40 split with 1-col separator
+        let left_cols = (total_inner_cols.saturating_sub(1)) * 60 / 100;
+        let right_cols = total_inner_cols.saturating_sub(1).saturating_sub(left_cols);
+
+        let rc = crate::screen::ensure_screenrc();
+
+        // Spawn left PTY
+        match PtySession::spawn("screen", &["-c", &rc, "-r", &left_pid], pty_rows, left_cols) {
+            Ok(pty) => {
+                pty.write_all(b"\x0c");
+                self.pty_session = Some(pty);
+            }
+            Err(e) => {
+                self.set_status(format!("Failed to attach left: {e}"));
+                return;
+            }
+        }
+
+        // Spawn right PTY
+        match PtySession::spawn("screen", &["-c", &rc, "-r", &right_pid], pty_rows, right_cols) {
+            Ok(pty) => {
+                pty.write_all(b"\x0c");
+                self.pty_right = Some(pty);
+            }
+            Err(e) => {
+                self.pty_session = None; // clean up left
+                self.set_status(format!("Failed to attach right: {e}"));
+                return;
+            }
+        }
+
+        self.attached_name = name.to_string();
+        self.attached_right_name = right_name;
+        self.active_pane = Pane::Left;
+        self.mode = Mode::Attached;
+    }
+
     pub fn attach_selected(&mut self, term_rows: u16, term_cols: u16) {
         let item = match self.selected_display_item() {
             Some(item) => item.clone(),
@@ -278,44 +358,88 @@ impl App {
                 let pid_name = session.pid_name.clone();
                 self.attach_session(&name, &pid_name, term_rows, term_cols);
             }
-            ListItem::RepoItem(repo) => {
-                let name = repo.name.clone();
-                let path = repo.path.clone();
-                match screen::create_session_in_dir(&name, &path) {
-                    Ok(()) => {
-                        self.set_status(format!("Created session '{name}'"));
-                        self.refresh_sessions();
-                        // Find the newly created session and attach
-                        let pid_name = self
-                            .sessions
-                            .iter()
-                            .find(|s| s.name == name)
-                            .map(|s| s.pid_name.clone());
-                        if let Some(pid_name) = pid_name {
-                            self.attach_session(&name, &pid_name, term_rows, term_cols);
+            ListItem::TreeRepo {
+                name, path, session, ..
+            } => {
+                if self.workspace_dir.is_some() {
+                    // Two-pane mode for workspace repos
+                    self.attach_two_pane(&name, &path, term_rows, term_cols);
+                } else if let Some(session) = session {
+                    self.attach_session(&session.name, &session.pid_name, term_rows, term_cols);
+                } else {
+                    match screen::create_session_in_dir(&name, &path) {
+                        Ok(()) => {
+                            self.set_status(format!("Created session '{name}'"));
+                            self.refresh_sessions();
+                            let pid_name = self
+                                .sessions
+                                .iter()
+                                .find(|s| s.name == name)
+                                .map(|s| s.pid_name.clone());
+                            if let Some(pid_name) = pid_name {
+                                self.attach_session(&name, &pid_name, term_rows, term_cols);
+                            }
                         }
-                    }
-                    Err(e) => {
-                        self.set_status(format!("Error: {e}"));
+                        Err(e) => {
+                            self.set_status(format!("Error: {e}"));
+                        }
                     }
                 }
             }
-            ListItem::SectionHeader(_) => {}
+            ListItem::SectionHeader(_) | ListItem::TreeDir { .. } => {}
         }
     }
 
     pub fn detach_pty(&mut self) {
+        // Send Ctrl+A, d to cleanly detach screen sessions
+        if let Some(ref pty) = self.pty_session {
+            pty.write_all(b"\x01d");
+        }
+        if let Some(ref pty) = self.pty_right {
+            pty.write_all(b"\x01d");
+        }
+        // Small delay for screen to process detach
+        std::thread::sleep(Duration::from_millis(50));
+
         self.pty_session = None;
+        self.pty_right = None;
         self.attached_name.clear();
+        self.attached_right_name.clear();
+        self.active_pane = Pane::Left;
         self.mode = Mode::Normal;
         self.refresh_sessions();
     }
 
+    pub fn swap_pane(&mut self) {
+        if self.pty_right.is_some() {
+            self.active_pane = match self.active_pane {
+                Pane::Left => Pane::Right,
+                Pane::Right => Pane::Left,
+            };
+        }
+    }
+
     pub fn resize_pty(&mut self, term_rows: u16, term_cols: u16) {
-        if let Some(ref mut pty) = self.pty_session {
-            let pty_rows = term_rows.saturating_sub(3);
+        let pty_rows = term_rows.saturating_sub(3);
+
+        if self.pty_right.is_some() {
+            // Two-pane mode: recalculate 60/40 split
+            let total_inner_cols = term_cols.saturating_sub(2);
+            let left_cols = (total_inner_cols.saturating_sub(1)) * 60 / 100;
+            let right_cols = total_inner_cols.saturating_sub(1).saturating_sub(left_cols);
+
+            if let Some(ref mut pty) = self.pty_session {
+                pty.resize(pty_rows, left_cols);
+            }
+            if let Some(ref mut pty) = self.pty_right {
+                pty.resize(pty_rows, right_cols);
+            }
+        } else {
+            // Single pane
             let pty_cols = term_cols.saturating_sub(2);
-            pty.resize(pty_rows, pty_cols);
+            if let Some(ref mut pty) = self.pty_session {
+                pty.resize(pty_rows, pty_cols);
+            }
         }
     }
 
@@ -416,6 +540,107 @@ impl App {
             .as_ref()
             .is_some_and(|current| *current == session.pid_name)
     }
+}
+
+fn flatten_tree(
+    node: &TreeNode,
+    depth: usize,
+    session_map: &std::collections::HashMap<&str, &Session>,
+    merged: &mut std::collections::HashSet<String>,
+    display_items: &mut Vec<ListItem>,
+    selectable_indices: &mut Vec<usize>,
+) {
+    if !node.is_repo {
+        display_items.push(ListItem::TreeDir {
+            name: node.name.clone(),
+            depth,
+        });
+    }
+
+    for child in &node.children {
+        if child.is_repo {
+            let session = session_map.get(child.name.as_str()).cloned().cloned();
+            if let Some(ref s) = session {
+                merged.insert(s.name.clone());
+            }
+            let companion = format!("{}-2", child.name);
+            if session_map.contains_key(companion.as_str()) {
+                merged.insert(companion);
+            }
+
+            let idx = display_items.len();
+            display_items.push(ListItem::TreeRepo {
+                name: child.name.clone(),
+                path: child.path.clone(),
+                depth: depth + 1,
+                session,
+            });
+            selectable_indices.push(idx);
+        } else {
+            flatten_tree(child, depth + 1, session_map, merged, display_items, selectable_indices);
+        }
+    }
+}
+
+fn flatten_filtered(
+    node: &TreeNode,
+    depth: usize,
+    query: &str,
+    session_map: &std::collections::HashMap<&str, &Session>,
+    merged: &mut std::collections::HashSet<String>,
+    display_items: &mut Vec<ListItem>,
+    selectable_indices: &mut Vec<usize>,
+) {
+    if !node.is_repo {
+        if !tree_has_match(node, query) {
+            return;
+        }
+        display_items.push(ListItem::TreeDir {
+            name: node.name.clone(),
+            depth,
+        });
+    }
+
+    for child in &node.children {
+        if child.is_repo {
+            if fuzzy_match(&child.name, query).is_none() {
+                continue;
+            }
+            let session = session_map.get(child.name.as_str()).cloned().cloned();
+            if let Some(ref s) = session {
+                merged.insert(s.name.clone());
+            }
+            let companion = format!("{}-2", child.name);
+            if session_map.contains_key(companion.as_str()) {
+                merged.insert(companion);
+            }
+
+            let idx = display_items.len();
+            display_items.push(ListItem::TreeRepo {
+                name: child.name.clone(),
+                path: child.path.clone(),
+                depth: depth + 1,
+                session,
+            });
+            selectable_indices.push(idx);
+        } else {
+            flatten_filtered(child, depth + 1, query, session_map, merged, display_items, selectable_indices);
+        }
+    }
+}
+
+/// Check if any repo descendant of this node matches the query.
+fn tree_has_match(node: &TreeNode, query: &str) -> bool {
+    for child in &node.children {
+        if child.is_repo {
+            if fuzzy_match(&child.name, query).is_some() {
+                return true;
+            }
+        } else if tree_has_match(child, query) {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn fuzzy_match(haystack: &str, needle: &str) -> Option<Vec<usize>> {

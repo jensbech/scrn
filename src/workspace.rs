@@ -2,28 +2,40 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
-pub struct RepoEntry {
+pub struct TreeNode {
     pub name: String,
     pub path: PathBuf,
-    pub group: String,
+    pub is_repo: bool,
+    pub children: Vec<TreeNode>,
 }
 
-pub fn scan_repos(dir: &Path) -> Vec<RepoEntry> {
-    let mut repos = Vec::new();
-    scan_recursive(dir, dir, &mut repos);
-    repos.sort_by(|a, b| {
-        let ga = a.group.to_lowercase();
-        let gb = b.group.to_lowercase();
-        ga.cmp(&gb).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    repos
+/// Build a recursive tree of directories and repos under `dir`.
+/// Repo nodes (have .git) are leaves; non-repo dirs recurse.
+/// Hidden directories (`.` prefix) are skipped.
+/// Children sorted alphabetically (case-insensitive).
+pub fn scan_tree(dir: &Path) -> TreeNode {
+    let name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    let mut root = TreeNode {
+        name,
+        path: dir.to_path_buf(),
+        is_repo: false,
+        children: Vec::new(),
+    };
+    scan_tree_recursive(dir, &mut root);
+    root
 }
 
-fn scan_recursive(root: &Path, dir: &Path, repos: &mut Vec<RepoEntry>) {
+fn scan_tree_recursive(dir: &Path, node: &mut TreeNode) {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => return,
     };
+
+    let mut children: Vec<TreeNode> = Vec::new();
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -39,23 +51,37 @@ fn scan_recursive(root: &Path, dir: &Path, repos: &mut Vec<RepoEntry>) {
             continue;
         }
 
+        let child_name = entry
+            .file_name()
+            .to_str()
+            .unwrap_or("")
+            .to_string();
+
         if path.join(".git").exists() {
-            // It's a repo — record it with the group being the relative path from root to parent
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                let group = path
-                    .parent()
-                    .and_then(|p| p.strip_prefix(root).ok())
-                    .map(|rel| rel.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                repos.push(RepoEntry {
-                    name: name.to_string(),
-                    path,
-                    group,
-                });
-            }
+            // Repo leaf node
+            children.push(TreeNode {
+                name: child_name,
+                path,
+                is_repo: true,
+                children: Vec::new(),
+            });
         } else {
-            // Not a repo — descend into it
-            scan_recursive(root, &path, repos);
+            // Directory node — recurse
+            let mut child = TreeNode {
+                name: child_name,
+                path: path.clone(),
+                is_repo: false,
+                children: Vec::new(),
+            };
+            scan_tree_recursive(&path, &mut child);
+            // Only include directory if it has descendants
+            if !child.children.is_empty() {
+                children.push(child);
+            }
         }
     }
+
+    // Sort alphabetically, case-insensitive
+    children.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    node.children = children;
 }

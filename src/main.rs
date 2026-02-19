@@ -20,7 +20,7 @@ use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{Action, App, Mode};
+use app::{Action, App, Mode, Pane};
 
 fn input_insert(s: &mut String, cursor: &mut usize, c: char) {
     let bp = s
@@ -125,6 +125,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 true
             };
+            // Also read right pane
+            if let Some(ref mut pty_right) = app.pty_right {
+                pty_right.try_read();
+                if !pty_right.is_running() {
+                    // Right pane died — detach both
+                    app.detach_pty();
+                    continue;
+                }
+            }
             if should_detach {
                 app.detach_pty();
             }
@@ -133,23 +142,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         terminal.draw(|f| ui::draw(f, &app))?;
 
         // Render PTY content directly to the terminal, bypassing ratatui/crossterm.
-        // This preserves exact ANSI color codes that terminals expect.
         if app.mode == Mode::Attached {
-            if let Some(ref pty) = app.pty_session {
-                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-                // Inner area = full area minus 1-cell border on each side minus status bar
-                let inner_x = 1u16;
-                let inner_y = 1u16;
-                let inner_w = cols.saturating_sub(2);
-                let inner_h = rows.saturating_sub(3);
-                ui::render_pty_direct(
-                    terminal.backend_mut(),
-                    pty.screen(),
-                    inner_x,
-                    inner_y,
-                    inner_w,
-                    inner_h,
-                )?;
+            let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+
+            if app.pty_right.is_some() {
+                // Two-pane mode
+                let (left_x, left_w, right_x, right_w, inner_y, inner_h) =
+                    ui::two_pane_geometry(cols, rows);
+
+                if let Some(ref pty) = app.pty_session {
+                    let is_active = app.active_pane == Pane::Left;
+                    ui::render_pty_direct(
+                        terminal.backend_mut(),
+                        pty.screen(),
+                        left_x,
+                        inner_y,
+                        left_w,
+                        inner_h,
+                        is_active,
+                    )?;
+                }
+                if let Some(ref pty) = app.pty_right {
+                    let is_active = app.active_pane == Pane::Right;
+                    ui::render_pty_direct(
+                        terminal.backend_mut(),
+                        pty.screen(),
+                        right_x,
+                        inner_y,
+                        right_w,
+                        inner_h,
+                        is_active,
+                    )?;
+                }
+            } else {
+                // Single pane
+                if let Some(ref pty) = app.pty_session {
+                    let inner_x = 1u16;
+                    let inner_y = 1u16;
+                    let inner_w = cols.saturating_sub(2);
+                    let inner_h = rows.saturating_sub(3);
+                    ui::render_pty_direct(
+                        terminal.backend_mut(),
+                        pty.screen(),
+                        inner_x,
+                        inner_y,
+                        inner_w,
+                        inner_h,
+                        true,
+                    )?;
+                }
             }
         }
 
@@ -187,18 +228,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 last_esc = None;
                                 app.detach_pty();
                             } else {
-                                // First Esc — forward to PTY and start timer
+                                // First Esc — forward to active pane PTY and start timer
                                 last_esc = Some(Instant::now());
-                                if let Some(ref pty_session) = app.pty_session {
-                                    pty_session.write_all(&[0x1b]);
+                                let active_pty = match app.active_pane {
+                                    Pane::Left => app.pty_session.as_ref(),
+                                    Pane::Right => app.pty_right.as_ref(),
+                                };
+                                if let Some(pty) = active_pty {
+                                    pty.write_all(&[0x1b]);
                                 }
                             }
+                        } else if key.code == KeyCode::F(6) {
+                            // F6 — swap active pane
+                            last_esc = None;
+                            app.swap_pane();
                         } else {
                             last_esc = None;
-                            // Forward everything else to the PTY
+                            // Forward everything else to the active pane's PTY
                             let bytes = pty::key_to_bytes(&key);
-                            if let Some(ref pty_session) = app.pty_session {
-                                pty_session.write_all(&bytes);
+                            let active_pty = match app.active_pane {
+                                Pane::Left => app.pty_session.as_ref(),
+                                Pane::Right => app.pty_right.as_ref(),
+                            };
+                            if let Some(pty) = active_pty {
+                                pty.write_all(&bytes);
                             }
                         }
                     }
