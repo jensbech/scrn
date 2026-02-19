@@ -118,9 +118,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Track whether PTY content needs re-rendering (dirty = new data or resize)
     let mut pty_needs_render = false;
+    // Track when UI chrome (border/status bar) needs redrawing via ratatui
+    let mut ui_needs_draw = false;
+    // Rate-limit rendering — accumulate PTY data between frames
+    let mut last_render = Instant::now();
+    const FRAME_BUDGET: Duration = Duration::from_millis(8); // ~120fps max
 
     loop {
-        // Read PTY output before drawing (so display is up to date)
+        // ── 1. Drain PTY output (fast — just memcpy + vt100 parse) ──
         if app.mode == Mode::Attached {
             let (left_dirty, should_detach) = if let Some(ref mut pty) = app.pty_session {
                 let dirty = pty.try_read();
@@ -147,85 +152,95 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pty_needs_render = pty_needs_render || left_dirty || right_dirty;
         }
 
-        // Begin synchronized output + hide cursor before any rendering.
-        // The terminal buffers all writes until the end marker, then renders
-        // the entire frame atomically — no intermediate states visible.
+        // ── 2. Render (rate-limited, skip ratatui on PTY-only frames) ──
         if app.mode == Mode::Attached {
-            write!(terminal.backend_mut(), "\x1b[?2026h\x1b[?25l")?;
-        }
+            let render_due = last_render.elapsed() >= FRAME_BUDGET;
+            if (pty_needs_render || ui_needs_draw) && render_due {
+                // Begin synchronized output + hide cursor
+                write!(terminal.backend_mut(), "\x1b[?2026h\x1b[?25l")?;
 
-        terminal.draw(|f| ui::draw(f, &app))?;
-
-        // Render PTY content directly to the terminal, bypassing ratatui/crossterm.
-        if app.mode == Mode::Attached {
-            let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-
-            if app.pty_right.is_some() {
-                // Two-pane mode
-                let (left_x, left_w, right_x, right_w, inner_y, inner_h) =
-                    ui::two_pane_geometry(cols, rows);
-
-                if pty_needs_render {
-                    if let Some(ref pty) = app.pty_session {
-                        ui::render_pty_direct(
-                            terminal.backend_mut(),
-                            pty.screen(),
-                            left_x,
-                            inner_y,
-                            left_w,
-                            inner_h,
-                        )?;
-                    }
-                    if let Some(ref pty) = app.pty_right {
-                        ui::render_pty_direct(
-                            terminal.backend_mut(),
-                            pty.screen(),
-                            right_x,
-                            inner_y,
-                            right_w,
-                            inner_h,
-                        )?;
-                    }
+                // Only call ratatui draw when UI chrome needs updating
+                // (first frame, resize, pane swap). Skipping this on normal
+                // frames avoids buffer management + diff + 2 flushes.
+                if ui_needs_draw {
+                    terminal.draw(|f| ui::draw(f, &app))?;
+                    ui_needs_draw = false;
                 }
 
-                // Position cursor at active pane (every frame for smooth cursor)
-                let (cursor_x, cursor_screen) = match app.active_pane {
-                    Pane::Left => (left_x, app.pty_session.as_ref().map(|p| p.screen())),
-                    Pane::Right => (right_x, app.pty_right.as_ref().map(|p| p.screen())),
-                };
-                if let Some(screen) = cursor_screen {
-                    ui::write_pty_cursor(terminal.backend_mut(), screen, cursor_x, inner_y)?;
-                }
-            } else {
-                // Single pane
-                let inner_x = 1u16;
-                let inner_y = 1u16;
-                let inner_w = cols.saturating_sub(2);
-                let inner_h = rows.saturating_sub(3);
+                // Render PTY cells + cursor directly
+                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
 
-                if pty_needs_render {
+                if app.pty_right.is_some() {
+                    let (left_x, left_w, right_x, right_w, inner_y, inner_h) =
+                        ui::two_pane_geometry(cols, rows);
+
+                    if pty_needs_render {
+                        if let Some(ref pty) = app.pty_session {
+                            ui::render_pty_direct(
+                                terminal.backend_mut(),
+                                pty.screen(),
+                                left_x,
+                                inner_y,
+                                left_w,
+                                inner_h,
+                            )?;
+                        }
+                        if let Some(ref pty) = app.pty_right {
+                            ui::render_pty_direct(
+                                terminal.backend_mut(),
+                                pty.screen(),
+                                right_x,
+                                inner_y,
+                                right_w,
+                                inner_h,
+                            )?;
+                        }
+                    }
+
+                    let (cursor_x, cursor_screen) = match app.active_pane {
+                        Pane::Left => (left_x, app.pty_session.as_ref().map(|p| p.screen())),
+                        Pane::Right => (right_x, app.pty_right.as_ref().map(|p| p.screen())),
+                    };
+                    if let Some(screen) = cursor_screen {
+                        ui::write_pty_cursor(terminal.backend_mut(), screen, cursor_x, inner_y)?;
+                    }
+                } else {
+                    let inner_x = 1u16;
+                    let inner_y = 1u16;
+                    let inner_w = cols.saturating_sub(2);
+                    let inner_h = rows.saturating_sub(3);
+
+                    if pty_needs_render {
+                        if let Some(ref pty) = app.pty_session {
+                            ui::render_pty_direct(
+                                terminal.backend_mut(),
+                                pty.screen(),
+                                inner_x,
+                                inner_y,
+                                inner_w,
+                                inner_h,
+                            )?;
+                        }
+                    }
+
                     if let Some(ref pty) = app.pty_session {
-                        ui::render_pty_direct(
+                        ui::write_pty_cursor(
                             terminal.backend_mut(),
                             pty.screen(),
                             inner_x,
                             inner_y,
-                            inner_w,
-                            inner_h,
                         )?;
                     }
                 }
 
-                // Position cursor (every frame)
-                if let Some(ref pty) = app.pty_session {
-                    ui::write_pty_cursor(terminal.backend_mut(), pty.screen(), inner_x, inner_y)?;
-                }
+                // End synchronized output — terminal renders the whole frame at once
+                write!(terminal.backend_mut(), "\x1b[?2026l")?;
+                terminal.backend_mut().flush()?;
+                pty_needs_render = false;
+                last_render = Instant::now();
             }
-
-            // End synchronized output — terminal renders the whole frame at once
-            write!(terminal.backend_mut(), "\x1b[?2026l")?;
-            terminal.backend_mut().flush()?;
-            pty_needs_render = false;
+        } else {
+            terminal.draw(|f| ui::draw(f, &app))?;
         }
 
         // Auto-clear stale status messages (only in list view)
@@ -245,9 +260,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Action::None => {}
         }
 
-        // Poll faster when attached (smooth terminal), slower for list view
+        // ── 3. Poll for input ──
+        // When PTY data is pending but render isn't due yet, sleep just
+        // long enough until the next frame. Otherwise idle at frame rate.
         let poll_duration = if app.mode == Mode::Attached {
-            Duration::from_millis(16)
+            if pty_needs_render {
+                FRAME_BUDGET
+                    .saturating_sub(last_render.elapsed())
+                    .max(Duration::from_millis(1))
+            } else {
+                FRAME_BUDGET
+            }
         } else {
             Duration::from_millis(100)
         };
@@ -276,6 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // F6 — swap active pane
                             last_esc = None;
                             app.swap_pane();
+                            ui_needs_draw = true;
                         } else {
                             last_esc = None;
                             // Forward everything else to the active pane's PTY
@@ -300,7 +324,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let (cols, rows) =
                                 crossterm::terminal::size().unwrap_or((80, 24));
                             app.attach_selected(rows, cols);
-                            pty_needs_render = true;
+                            if app.mode == Mode::Attached {
+                                pty_needs_render = true;
+                                ui_needs_draw = true;
+                            }
                         }
                         KeyCode::Char('c') => app.start_create(),
                         KeyCode::Char('n') => app.start_rename(),
@@ -382,7 +409,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Resize(cols, rows) => {
                     if app.mode == Mode::Attached {
                         app.resize_pty(rows, cols);
-                        pty_needs_render = true; // force re-render after resize
+                        pty_needs_render = true;
+                        ui_needs_draw = true;
                     }
                 }
                 _ => {}

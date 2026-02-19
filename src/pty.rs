@@ -74,7 +74,7 @@ impl PtySession {
     /// Returns `true` if any data was read (screen may have changed).
     pub fn try_read(&mut self) -> bool {
         let mut any = false;
-        let mut buf = [0u8; 8192];
+        let mut buf = [0u8; 65536];
         loop {
             let n = unsafe {
                 libc::read(
