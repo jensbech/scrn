@@ -14,6 +14,26 @@ pub struct PtySession {
 
 impl PtySession {
     pub fn spawn(program: &str, args: &[&str], rows: u16, cols: u16) -> io::Result<Self> {
+        Self::spawn_inner(program, args, rows, cols, None)
+    }
+
+    pub fn spawn_in_dir(
+        program: &str,
+        args: &[&str],
+        rows: u16,
+        cols: u16,
+        dir: &std::path::Path,
+    ) -> io::Result<Self> {
+        Self::spawn_inner(program, args, rows, cols, Some(dir))
+    }
+
+    fn spawn_inner(
+        program: &str,
+        args: &[&str],
+        rows: u16,
+        cols: u16,
+        dir: Option<&std::path::Path>,
+    ) -> io::Result<Self> {
         let (master, slave) = open_pty()?;
         set_pty_size(master.as_raw_fd(), rows, cols);
         set_nonblocking(master.as_raw_fd())?;
@@ -22,14 +42,17 @@ impl PtySession {
         let dup1 = dup_fd(slave_raw)?;
         let dup2 = dup_fd(slave_raw)?;
 
+        let mut cmd = Command::new(program);
+        cmd.args(args)
+            .env("TERM", "xterm-256color")
+            .env("COLORTERM", "truecolor")
+            .env_remove("STY")
+            .env_remove("WINDOW");
+        if let Some(dir) = dir {
+            cmd.current_dir(dir);
+        }
         let child = unsafe {
-            Command::new(program)
-                .args(args)
-                .env("TERM", "xterm-256color")
-                .env("COLORTERM", "truecolor")
-                .env_remove("STY")
-                .env_remove("WINDOW")
-                .stdin(Stdio::from_raw_fd(slave_raw))
+            cmd.stdin(Stdio::from_raw_fd(slave_raw))
                 .stdout(Stdio::from_raw_fd(dup1))
                 .stderr(Stdio::from_raw_fd(dup2))
                 .pre_exec(|| {

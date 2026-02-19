@@ -268,29 +268,6 @@ impl App {
     ) {
         let right_name = format!("{name}-2");
 
-        // Ensure left session exists
-        let left_exists = self.all_sessions.iter().any(|s| s.name == name);
-        if !left_exists {
-            if let Err(e) = screen::create_session_in_dir(name, path) {
-                self.set_status(format!("Error: {e}"));
-                return;
-            }
-        }
-
-        // Ensure right session exists
-        let right_exists = self.all_sessions.iter().any(|s| s.name == right_name);
-        if !right_exists {
-            if let Err(e) = screen::create_session_in_dir(&right_name, path) {
-                self.set_status(format!("Error: {e}"));
-                return;
-            }
-        }
-
-        // Re-read sessions to get pid_names
-        if let Ok(sessions) = screen::list_sessions() {
-            self.all_sessions = sessions;
-        }
-
         let left_pid = self
             .all_sessions
             .iter()
@@ -302,11 +279,6 @@ impl App {
             .find(|s| s.name == right_name)
             .map(|s| s.pid_name.clone());
 
-        let (Some(left_pid), Some(right_pid)) = (left_pid, right_pid) else {
-            self.set_status("Failed to find sessions after creation".to_string());
-            return;
-        };
-
         let pty_rows = term_rows.saturating_sub(3);
         let total_inner_cols = term_cols.saturating_sub(2);
         // 60/40 split with 1-col separator
@@ -315,8 +287,13 @@ impl App {
 
         let rc = crate::screen::ensure_screenrc();
 
-        // Spawn left PTY
-        match PtySession::spawn("screen", &["-c", &rc, "-d", "-r", &left_pid], pty_rows, left_cols) {
+        // Spawn left PTY: create+attach for new sessions, reattach for existing
+        let left_result = if let Some(ref pid) = left_pid {
+            PtySession::spawn("screen", &["-c", &rc, "-d", "-r", pid], pty_rows, left_cols)
+        } else {
+            PtySession::spawn_in_dir("screen", &["-c", &rc, "-S", name], pty_rows, left_cols, path)
+        };
+        match left_result {
             Ok(pty) => {
                 self.pty_session = Some(pty);
             }
@@ -327,7 +304,18 @@ impl App {
         }
 
         // Spawn right PTY
-        match PtySession::spawn("screen", &["-c", &rc, "-d", "-r", &right_pid], pty_rows, right_cols) {
+        let right_result = if let Some(ref pid) = right_pid {
+            PtySession::spawn("screen", &["-c", &rc, "-d", "-r", pid], pty_rows, right_cols)
+        } else {
+            PtySession::spawn_in_dir(
+                "screen",
+                &["-c", &rc, "-S", &right_name],
+                pty_rows,
+                right_cols,
+                path,
+            )
+        };
+        match right_result {
             Ok(pty) => {
                 self.pty_right = Some(pty);
             }
@@ -364,18 +352,21 @@ impl App {
                 } else if let Some(session) = session {
                     self.attach_session(&session.name, &session.pid_name, term_rows, term_cols);
                 } else {
-                    match screen::create_session_in_dir(&name, &path) {
-                        Ok(()) => {
-                            self.set_status(format!("Created session '{name}'"));
-                            self.refresh_sessions();
-                            let pid_name = self
-                                .sessions
-                                .iter()
-                                .find(|s| s.name == name)
-                                .map(|s| s.pid_name.clone());
-                            if let Some(pid_name) = pid_name {
-                                self.attach_session(&name, &pid_name, term_rows, term_cols);
-                            }
+                    // Create + attach in one step so the shell starts at the correct PTY size
+                    let pty_rows = term_rows.saturating_sub(3);
+                    let pty_cols = term_cols.saturating_sub(2);
+                    let rc = crate::screen::ensure_screenrc();
+                    match PtySession::spawn_in_dir(
+                        "screen",
+                        &["-c", &rc, "-S", &name],
+                        pty_rows,
+                        pty_cols,
+                        &path,
+                    ) {
+                        Ok(pty) => {
+                            self.pty_session = Some(pty);
+                            self.attached_name = name;
+                            self.mode = Mode::Attached;
                         }
                         Err(e) => {
                             self.set_status(format!("Error: {e}"));

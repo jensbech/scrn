@@ -213,19 +213,4 @@ pub fn create_session(name: &str) -> Result<(), String> {
     }
 }
 
-pub fn create_session_in_dir(name: &str, dir: &std::path::Path) -> Result<(), String> {
-    let rc = ensure_screenrc();
-    let output = Command::new("screen")
-        .args(["-c", &rc, "-dmS", name])
-        .current_dir(dir)
-        .env("COLORTERM", "truecolor")
-        .output()
-        .map_err(|e| format!("Failed to create session: {e}"))?;
 
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("Failed to create session: {}", stderr.trim()))
-    }
-}
