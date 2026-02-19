@@ -47,7 +47,7 @@ const COUNT_FG: Color = Color::Rgb(100, 100, 120);
 const SECTION_FG: Color = Color::Rgb(140, 120, 180);
 const REPO_FG: Color = Color::Rgb(180, 180, 200);
 const SEPARATOR_FG: Color = Color::Rgb(60, 60, 80);
-const ACTIVE_BORDER_FG: Color = Color::Rgb(100, 100, 140);
+const ACTIVE_PANE_BORDER: Color = Color::Rgb(120, 160, 255);
 
 fn split_at_char_pos(s: &str, pos: usize) -> (&str, &str) {
     let byte_pos = s
@@ -1021,6 +1021,10 @@ fn draw_attached(f: &mut Frame, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
+                "> ",
+                Style::default().fg(DIM).bg(BASE_BG),
+            ),
+            Span::styled(
                 format!("{} ", app.attached_name),
                 Style::default().fg(FG_BRIGHT).bg(BASE_BG),
             ),
@@ -1049,16 +1053,66 @@ fn draw_attached(f: &mut Frame, app: &App) {
             }
         }
 
-        // Draw active pane indicator at top of separator
-        if let Some(cell) = buf.cell_mut((sep_x, inner.top())) {
-            match app.active_pane {
-                Pane::Left => {
-                    cell.set_fg(ACTIVE_BORDER_FG);
-                    cell.set_symbol("\u{2524}"); // ┤
+        // Highlight active pane border
+        let c = ACTIVE_PANE_BORDER;
+        let bx = box_area.x;
+        let by = box_area.y;
+        let bw = box_area.width;
+        let bh = box_area.height;
+
+        match app.active_pane {
+            Pane::Left => {
+                // Top edge: left corner to separator (exclusive)
+                for x in bx..sep_x {
+                    if let Some(cell) = buf.cell_mut((x, by)) { cell.set_fg(c); }
                 }
-                Pane::Right => {
-                    cell.set_fg(ACTIVE_BORDER_FG);
-                    cell.set_symbol("\u{251c}"); // ├
+                // Bottom edge: left corner to separator (exclusive)
+                for x in bx..sep_x {
+                    if let Some(cell) = buf.cell_mut((x, by + bh - 1)) { cell.set_fg(c); }
+                }
+                // Left side
+                for y in by..by + bh {
+                    if let Some(cell) = buf.cell_mut((bx, y)) { cell.set_fg(c); }
+                }
+                // Separator inner rows
+                for y in inner.top()..inner.bottom() {
+                    if let Some(cell) = buf.cell_mut((sep_x, y)) { cell.set_fg(c); }
+                }
+                // Junction corners: ┐ top, ┘ bottom (closes the left pane box)
+                if let Some(cell) = buf.cell_mut((sep_x, by)) {
+                    cell.set_symbol("\u{2510}"); // ┐
+                    cell.set_fg(c);
+                }
+                if let Some(cell) = buf.cell_mut((sep_x, by + bh - 1)) {
+                    cell.set_symbol("\u{2518}"); // ┘
+                    cell.set_fg(c);
+                }
+            }
+            Pane::Right => {
+                // Top edge: after separator to right corner
+                for x in (sep_x + 1)..bx + bw {
+                    if let Some(cell) = buf.cell_mut((x, by)) { cell.set_fg(c); }
+                }
+                // Bottom edge: after separator to right corner
+                for x in (sep_x + 1)..bx + bw {
+                    if let Some(cell) = buf.cell_mut((x, by + bh - 1)) { cell.set_fg(c); }
+                }
+                // Right side
+                for y in by..by + bh {
+                    if let Some(cell) = buf.cell_mut((bx + bw - 1, y)) { cell.set_fg(c); }
+                }
+                // Separator inner rows
+                for y in inner.top()..inner.bottom() {
+                    if let Some(cell) = buf.cell_mut((sep_x, y)) { cell.set_fg(c); }
+                }
+                // Junction corners: ┌ top, └ bottom (closes the right pane box)
+                if let Some(cell) = buf.cell_mut((sep_x, by)) {
+                    cell.set_symbol("\u{250c}"); // ┌
+                    cell.set_fg(c);
+                }
+                if let Some(cell) = buf.cell_mut((sep_x, by + bh - 1)) {
+                    cell.set_symbol("\u{2514}"); // └
+                    cell.set_fg(c);
                 }
             }
         }
@@ -1112,7 +1166,7 @@ fn draw_attached(f: &mut Frame, app: &App) {
                 Style::default().fg(FG_BRIGHT).bg(BASE_BG),
             ),
             Span::styled(
-                " Ctrl+S:Swap  Ctrl+E/N:Scroll  Esc Esc:Back ",
+                " Ctrl+S:Swap  Ctrl+E/N:Scroll  Ctrl+O:List  Esc Esc:Back ",
                 Style::default().fg(HELP_FG).bg(BASE_BG),
             ),
         ]);
@@ -1134,7 +1188,7 @@ fn draw_attached(f: &mut Frame, app: &App) {
                 Style::default().fg(FG_BRIGHT).bg(BASE_BG),
             ),
             Span::styled(
-                " Ctrl+E/N:Scroll  Esc Esc:Back ",
+                " Ctrl+E/N:Scroll  Ctrl+O:List  Esc Esc:Back ",
                 Style::default().fg(HELP_FG).bg(BASE_BG),
             ),
         ]);

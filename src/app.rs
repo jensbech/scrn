@@ -120,10 +120,48 @@ impl App {
         if let Some(ref dir) = self.workspace_dir {
             self.workspace_tree = Some(workspace::scan_tree(dir));
         }
+        save_sessions(&self.all_sessions, &self.workspace_tree);
         self.apply_search_filter();
     }
 
+    pub fn restore_sessions(&mut self) {
+        let saved = load_saved_sessions();
+        if saved.is_empty() {
+            return;
+        }
+
+        let live_names: std::collections::HashSet<String> =
+            self.all_sessions.iter().map(|s| s.name.clone()).collect();
+
+        let mut restored = 0;
+        for (name, path) in &saved {
+            if live_names.contains(name) {
+                continue;
+            }
+            let result = if let Some(dir) = path {
+                screen::create_session_in_dir(name, dir)
+            } else {
+                screen::create_session(name)
+            };
+            match result {
+                Ok(()) => restored += 1,
+                Err(e) => crate::logging::log_error(&format!("Failed to restore session '{name}': {e}")),
+            }
+        }
+
+        if restored > 0 {
+            self.refresh_sessions();
+            self.set_status(format!(
+                "Restored {restored} session{}",
+                if restored == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
     pub fn set_status(&mut self, msg: String) {
+        if msg.starts_with("Error") || msg.starts_with("Failed") {
+            crate::logging::log_error(&msg);
+        }
         self.status_msg = msg;
         self.status_set_at = Instant::now();
     }
@@ -478,7 +516,7 @@ impl App {
             pty.write_all(b"\x01d");
         }
         // Wait for screen clients to exit cleanly (with timeout)
-        let deadline = Instant::now() + Duration::from_millis(200);
+        let deadline = Instant::now() + Duration::from_millis(50);
         while Instant::now() < deadline {
             let left_done = self
                 .pty_session
@@ -488,7 +526,7 @@ impl App {
             if left_done && right_done {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(2));
         }
 
         self.pty_session = None;
@@ -804,6 +842,14 @@ fn history_path() -> PathBuf {
         .join("history")
 }
 
+fn sessions_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("scrn")
+        .join("sessions")
+}
+
 fn load_history() -> HashMap<String, u64> {
     let path = history_path();
     let contents = match std::fs::read_to_string(&path) {
@@ -830,6 +876,59 @@ fn save_history(history: &HashMap<String, u64>) {
         .collect();
     lines.sort();
     let _ = std::fs::write(&path, lines.join("\n") + "\n");
+}
+
+fn collect_repo_paths(node: &TreeNode, map: &mut HashMap<String, PathBuf>) {
+    if node.is_repo {
+        map.insert(node.name.clone(), node.path.clone());
+    }
+    for child in &node.children {
+        collect_repo_paths(child, map);
+    }
+}
+
+fn save_sessions(all_sessions: &[Session], workspace_tree: &Option<TreeNode>) {
+    let path = sessions_path();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+
+    let mut repo_paths: HashMap<String, PathBuf> = HashMap::new();
+    if let Some(ref tree) = workspace_tree {
+        collect_repo_paths(tree, &mut repo_paths);
+    }
+
+    let mut lines: Vec<String> = all_sessions
+        .iter()
+        .filter(|s| !s.name.ends_with("-2"))
+        .filter(|s| !s.name.starts_with("tty") && !s.name.starts_with("pts"))
+        .map(|s| {
+            if let Some(p) = repo_paths.get(&s.name) {
+                format!("{}\t{}", s.name, p.display())
+            } else {
+                s.name.clone()
+            }
+        })
+        .collect();
+    lines.sort();
+    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+}
+
+fn load_saved_sessions() -> Vec<(String, Option<PathBuf>)> {
+    let path = sessions_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    contents
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            if let Some((name, path_str)) = line.split_once('\t') {
+                (name.to_string(), Some(PathBuf::from(path_str)))
+            } else {
+                (line.to_string(), None)
+            }
+        })
+        .collect()
 }
 
 fn format_relative(now: u64, ts: u64) -> String {

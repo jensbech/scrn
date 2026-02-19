@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod logging;
 mod pty;
 mod screen;
 mod shell;
@@ -71,6 +72,8 @@ fn input_backspace(s: &mut String, cursor: &mut usize) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    logging::setup_panic_hook();
+
     let args: Vec<String> = std::env::args().collect();
 
     // Handle subcommands
@@ -138,6 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new(action_file, cfg.workspace);
     app.refresh_sessions();
+    app.restore_sessions();
 
     let exit_action;
     let mut last_esc: Option<Instant> = None;
@@ -456,6 +460,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     pty.write_all(seq);
                                 }
                             }
+                            handled = true;
+                        }
+
+                        // Ctrl+O — detach and go back to session list
+                        if !handled && is_ctrl && key.code == KeyCode::Char('o') {
+                            last_esc = None;
+                            prev_screen_left = None;
+                            prev_screen_right = None;
+                            scroll_offset_left = 0;
+                            scroll_offset_right = 0;
+                            app.detach_pty();
                             handled = true;
                         }
 
