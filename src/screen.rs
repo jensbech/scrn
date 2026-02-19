@@ -135,6 +135,11 @@ pub fn list_sessions() -> Result<Vec<Session>, String> {
 
         let rest = parts[1..].join("\t");
 
+        // Skip dead sessions (process exited but socket lingered)
+        if rest.contains("Dead") {
+            continue;
+        }
+
         let state = if rest.contains("Attached") {
             SessionState::Attached
         } else {

@@ -247,8 +247,8 @@ impl App {
             let mut filtered_indices = Vec::new();
             for (i, item) in self.display_items.iter().enumerate() {
                 match item {
-                    ListItem::TreeRepo { name, .. } => {
-                        if history.contains_key(name.as_str()) {
+                    ListItem::TreeRepo { name, session, .. } => {
+                        if session.is_some() && history.contains_key(name.as_str()) {
                             filtered_indices.push(filtered_items.len());
                             filtered_items.push(item.clone());
                         }
