@@ -153,6 +153,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cache terminal size to avoid an ioctl syscall every frame
     let (mut term_cols, mut term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
 
+    // Previous frame screens for differential rendering — None forces full redraw
+    let mut prev_screen_left: Option<vt100::Screen> = None;
+    let mut prev_screen_right: Option<vt100::Screen> = None;
+
     loop {
         // ── 1. Drain PTY output (fast — just memcpy + vt100 parse) ──
         if app.mode == Mode::Attached {
@@ -166,6 +170,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let right_dirty = if let Some(ref mut pty_right) = app.pty_right {
                 let dirty = pty_right.try_read();
                 if !pty_right.is_running() {
+                    prev_screen_left = None;
+                    prev_screen_right = None;
                     app.detach_pty();
                     continue;
                 }
@@ -175,6 +181,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             if should_detach {
+                prev_screen_left = None;
+                prev_screen_right = None;
                 app.detach_pty();
             }
 
@@ -208,21 +216,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui::render_pty_direct(
                                 terminal.backend_mut(),
                                 pty.screen(),
+                                prev_screen_left.as_ref(),
                                 left_x,
                                 inner_y,
                                 left_w,
                                 inner_h,
                             )?;
+                            prev_screen_left = Some(pty.screen().clone());
                         }
                         if let Some(ref pty) = app.pty_right {
                             ui::render_pty_direct(
                                 terminal.backend_mut(),
                                 pty.screen(),
+                                prev_screen_right.as_ref(),
                                 right_x,
                                 inner_y,
                                 right_w,
                                 inner_h,
                             )?;
+                            prev_screen_right = Some(pty.screen().clone());
                         }
                     }
 
@@ -244,11 +256,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui::render_pty_direct(
                                 terminal.backend_mut(),
                                 pty.screen(),
+                                prev_screen_left.as_ref(),
                                 inner_x,
                                 inner_y,
                                 inner_w,
                                 inner_h,
                             )?;
+                            prev_screen_left = Some(pty.screen().clone());
                         }
                     }
 
@@ -336,6 +350,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if last_esc.is_some_and(|t| t.elapsed() < Duration::from_millis(300)) {
                                 // Double Esc — detach
                                 last_esc = None;
+                                prev_screen_left = None;
+                                prev_screen_right = None;
                                 app.detach_pty();
                             } else {
                                 // First Esc — forward to active pane PTY and start timer
@@ -356,6 +372,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             last_esc = None;
                             app.swap_pane();
                             ui_needs_draw = true;
+                            prev_screen_left = None;
+                            prev_screen_right = None;
                         } else {
                             last_esc = None;
                             // Forward everything else to the active pane's PTY
@@ -391,6 +409,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if app.mode == Mode::Attached {
                                 pty_needs_render = true;
                                 ui_needs_draw = true;
+                                prev_screen_left = None;
+                                prev_screen_right = None;
                             }
                         }
                         KeyCode::Char('c') => app.start_create(),
@@ -498,6 +518,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.resize_pty(rows, cols);
                         pty_needs_render = true;
                         ui_needs_draw = true;
+                        prev_screen_left = None;
+                        prev_screen_right = None;
                     }
                 }
                 _ => {}

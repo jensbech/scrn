@@ -1161,14 +1161,66 @@ pub fn two_pane_geometry(cols: u16, rows: u16) -> (u16, u16, u16, u16, u16, u16)
     (left_x, left_w, right_x, right_w, inner_y, inner_h)
 }
 
+/// Push the decimal representation of a u16 directly into a byte buffer,
+/// avoiding `write!`/`std::fmt` overhead.
+#[inline(always)]
+fn push_u16(buf: &mut Vec<u8>, n: u16) {
+    if n >= 10000 {
+        buf.push(b'0' + (n / 10000) as u8);
+    }
+    if n >= 1000 {
+        buf.push(b'0' + ((n / 1000) % 10) as u8);
+    }
+    if n >= 100 {
+        buf.push(b'0' + ((n / 100) % 10) as u8);
+    }
+    if n >= 10 {
+        buf.push(b'0' + ((n / 10) % 10) as u8);
+    }
+    buf.push(b'0' + (n % 10) as u8);
+}
+
+/// Push a u8 decimal representation into a byte buffer.
+#[inline(always)]
+fn push_u8(buf: &mut Vec<u8>, n: u8) {
+    if n >= 100 {
+        buf.push(b'0' + n / 100);
+    }
+    if n >= 10 {
+        buf.push(b'0' + (n / 10) % 10);
+    }
+    buf.push(b'0' + n % 10);
+}
+
+/// Push CSI sequence start (`\x1b[`) into a byte buffer.
+#[inline(always)]
+fn push_csi(buf: &mut Vec<u8>) {
+    buf.push(0x1b);
+    buf.push(b'[');
+}
+
+/// Push a CUP (cursor position) sequence: `\x1b[{row};{col}H`
+#[inline(always)]
+fn push_cup(buf: &mut Vec<u8>, row: u16, col: u16) {
+    push_csi(buf);
+    push_u16(buf, row);
+    buf.push(b';');
+    push_u16(buf, col);
+    buf.push(b'H');
+}
+
 /// Render PTY cell content directly to the terminal, bypassing ratatui.
 ///
 /// This function ONLY writes cell content — no cursor hide/show.
 /// Cursor visibility is managed by the caller at the frame level to
 /// avoid flicker from repeated hide/show cycles.
+///
+/// When `prev_screen` is provided, rows where every cell matches the
+/// previous frame are skipped entirely — zero bytes emitted for those rows.
 pub fn render_pty_direct(
     w: &mut impl Write,
     screen: &vt100::Screen,
+    prev_screen: Option<&vt100::Screen>,
     inner_x: u16,
     inner_y: u16,
     inner_w: u16,
@@ -1178,9 +1230,30 @@ pub fn render_pty_direct(
     let mut buf = Vec::with_capacity(inner_w as usize * inner_h as usize * 8);
 
     for row in 0..inner_h.min(scr_rows) {
-        write!(buf, "\x1b[{};{}H", inner_y + row + 1, inner_x + 1)?;
+        // Differential: skip unchanged rows
+        if let Some(prev) = prev_screen {
+            let (prev_rows, prev_cols) = prev.size();
+            if prev_rows == scr_rows && prev_cols == scr_cols {
+                let cols_to_check = inner_w.min(scr_cols);
+                let mut row_changed = false;
+                for col in 0..cols_to_check {
+                    let cur = screen.cell(row, col);
+                    let old = prev.cell(row, col);
+                    if cur != old {
+                        row_changed = true;
+                        break;
+                    }
+                }
+                if !row_changed {
+                    continue;
+                }
+            }
+        }
 
-        let mut prev: Option<CellStyle> = None;
+        push_cup(&mut buf, inner_y + row + 1, inner_x + 1);
+
+        // Reset prev_style per rendered row so SGR state is correct after skipping
+        let mut prev_style: Option<CellStyle> = None;
 
         for col in 0..inner_w.min(scr_cols) {
             if let Some(vt_cell) = screen.cell(row, col) {
@@ -1189,9 +1262,9 @@ pub fn render_pty_direct(
                 }
 
                 let style = CellStyle::from_vt(vt_cell);
-                if prev.as_ref() != Some(&style) {
-                    write_sgr(&mut buf, &style)?;
-                    prev = Some(style);
+                if prev_style.as_ref() != Some(&style) {
+                    write_sgr(&mut buf, &style);
+                    prev_style = Some(style);
                 }
 
                 let contents = vt_cell.contents();
@@ -1206,8 +1279,8 @@ pub fn render_pty_direct(
         let filled = inner_w.min(scr_cols);
         if filled < inner_w {
             let fill_style = CellStyle::default_cell();
-            if prev.as_ref() != Some(&fill_style) {
-                write_sgr(&mut buf, &fill_style)?;
+            if prev_style.as_ref() != Some(&fill_style) {
+                write_sgr(&mut buf, &fill_style);
             }
             for _ in filled..inner_w {
                 buf.push(b' ');
@@ -1217,18 +1290,28 @@ pub fn render_pty_direct(
 
     let filled_rows = inner_h.min(scr_rows);
     if filled_rows < inner_h {
-        let fill_style = CellStyle::default_cell();
-        write_sgr(&mut buf, &fill_style)?;
-        for row in filled_rows..inner_h {
-            write!(buf, "\x1b[{};{}H", inner_y + row + 1, inner_x + 1)?;
-            for _ in 0..inner_w {
-                buf.push(b' ');
+        // Only emit blank fill rows if there's no prev_screen or size changed
+        let need_fill = prev_screen.map_or(true, |prev| {
+            let (pr, _) = prev.size();
+            pr != scr_rows
+        });
+        if need_fill {
+            let fill_style = CellStyle::default_cell();
+            write_sgr(&mut buf, &fill_style);
+            for row in filled_rows..inner_h {
+                push_cup(&mut buf, inner_y + row + 1, inner_x + 1);
+                for _ in 0..inner_w {
+                    buf.push(b' ');
+                }
             }
         }
     }
 
-    buf.extend_from_slice(b"\x1b[0m");
-    w.write_all(&buf)
+    if !buf.is_empty() {
+        buf.extend_from_slice(b"\x1b[0m");
+        w.write_all(&buf)?;
+    }
+    Ok(())
 }
 
 /// Position the terminal cursor at the PTY app's cursor location and show it,
@@ -1248,7 +1331,10 @@ pub fn write_pty_cursor(
     let (cr, cc) = screen.cursor_position();
     let cursor_x = inner_x + cc + 1;
     let cursor_y = inner_y + cr + 1;
-    write!(w, "\x1b[{};{}H\x1b[?25h", cursor_y, cursor_x)
+    let mut buf = Vec::with_capacity(16);
+    push_cup(&mut buf, cursor_y, cursor_x);
+    buf.extend_from_slice(b"\x1b[?25h");
+    w.write_all(&buf)
 }
 
 #[derive(PartialEq)]
@@ -1285,40 +1371,28 @@ impl CellStyle {
     }
 }
 
-fn write_sgr(buf: &mut Vec<u8>, s: &CellStyle) -> std::io::Result<()> {
-    if s.inverse {
-        buf.extend_from_slice(b"\x1b[0");
-        if s.bold {
-            buf.extend_from_slice(b";1");
-        }
-        if s.italic {
-            buf.extend_from_slice(b";3");
-        }
-        if s.underline {
-            buf.extend_from_slice(b";4");
-        }
-        write_color(buf, s.bg, true)?;
-        write_color(buf, s.fg, false)?;
-        buf.push(b'm');
-    } else {
-        buf.extend_from_slice(b"\x1b[0");
-        if s.bold {
-            buf.extend_from_slice(b";1");
-        }
-        if s.italic {
-            buf.extend_from_slice(b";3");
-        }
-        if s.underline {
-            buf.extend_from_slice(b";4");
-        }
-        write_color(buf, s.fg, true)?;
-        write_color(buf, s.bg, false)?;
-        buf.push(b'm');
+fn write_sgr(buf: &mut Vec<u8>, s: &CellStyle) {
+    buf.extend_from_slice(b"\x1b[0");
+    if s.bold {
+        buf.extend_from_slice(b";1");
     }
-    Ok(())
+    if s.italic {
+        buf.extend_from_slice(b";3");
+    }
+    if s.underline {
+        buf.extend_from_slice(b";4");
+    }
+    if s.inverse {
+        write_color(buf, s.bg, true);
+        write_color(buf, s.fg, false);
+    } else {
+        write_color(buf, s.fg, true);
+        write_color(buf, s.bg, false);
+    }
+    buf.push(b'm');
 }
 
-fn write_color(buf: &mut Vec<u8>, color: vt100::Color, is_fg: bool) -> std::io::Result<()> {
+fn write_color(buf: &mut Vec<u8>, color: vt100::Color, is_fg: bool) {
     match color {
         vt100::Color::Default => {
             if is_fg {
@@ -1328,25 +1402,28 @@ fn write_color(buf: &mut Vec<u8>, color: vt100::Color, is_fg: bool) -> std::io::
             }
         }
         vt100::Color::Idx(i) if i < 8 => {
-            write!(buf, ";{}", if is_fg { 30 + i as u16 } else { 40 + i as u16 })?;
+            buf.push(b';');
+            push_u8(buf, if is_fg { 30 + i } else { 40 + i });
         }
         vt100::Color::Idx(i) if i < 16 => {
-            write!(
-                buf,
-                ";{}",
-                if is_fg {
-                    90 + (i - 8) as u16
-                } else {
-                    100 + (i - 8) as u16
-                }
-            )?;
+            buf.push(b';');
+            push_u8(buf, if is_fg { 90 + (i - 8) } else { 100 + (i - 8) });
         }
         vt100::Color::Idx(i) => {
-            write!(buf, ";{};5;{}", if is_fg { 38 } else { 48 }, i)?;
+            buf.push(b';');
+            push_u8(buf, if is_fg { 38 } else { 48 });
+            buf.extend_from_slice(b";5;");
+            push_u8(buf, i);
         }
         vt100::Color::Rgb(r, g, b) => {
-            write!(buf, ";{};2;{};{};{}", if is_fg { 38 } else { 48 }, r, g, b)?;
+            buf.push(b';');
+            push_u8(buf, if is_fg { 38 } else { 48 });
+            buf.extend_from_slice(b";2;");
+            push_u8(buf, r);
+            buf.push(b';');
+            push_u8(buf, g);
+            buf.push(b';');
+            push_u8(buf, b);
         }
     }
-    Ok(())
 }
