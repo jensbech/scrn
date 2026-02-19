@@ -3,10 +3,13 @@ use std::io::Write;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Table, TableState,
+};
 use ratatui::Frame;
 
-use crate::app::{fuzzy_match, App, Mode};
+use crate::app::{fuzzy_match, App, ListItem, Mode, Pane};
 use crate::screen::SessionState;
 
 // ── Palette — ALL explicit Rgb, zero ANSI named colors ─────
@@ -41,6 +44,10 @@ const DIM_FG: Color = Color::Rgb(50, 50, 60);
 const DIM_BG: Color = Color::Rgb(10, 10, 15);
 const VERSION_FG: Color = Color::Rgb(80, 80, 100);
 const COUNT_FG: Color = Color::Rgb(100, 100, 120);
+const SECTION_FG: Color = Color::Rgb(140, 120, 180);
+const REPO_FG: Color = Color::Rgb(180, 180, 200);
+const SEPARATOR_FG: Color = Color::Rgb(60, 60, 80);
+const ACTIVE_BORDER_FG: Color = Color::Rgb(100, 100, 140);
 
 fn split_at_char_pos(s: &str, pos: usize) -> (&str, &str) {
     let byte_pos = s
@@ -109,8 +116,6 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     // Paint entire screen with explicit fg + bg on every cell.
-    // This ensures no bleed-through from previous terminal content,
-    // which is critical inside GNU Screen where altscreen may be off.
     let area = f.area();
     let buf = f.buffer_mut();
     for y in area.top()..area.bottom() {
@@ -156,6 +161,18 @@ pub fn draw(f: &mut Frame, app: &App) {
             dim_background(f);
             draw_kill_modal(f, app);
         }
+        Mode::ConfirmKillAll1 => {
+            dim_background(f);
+            draw_kill_all_modal_1(f, app);
+        }
+        Mode::ConfirmKillAll2 => {
+            dim_background(f);
+            draw_kill_all_modal_2(f);
+        }
+        Mode::ConfirmQuit => {
+            dim_background(f);
+            draw_quit_modal(f);
+        }
         _ => {}
     }
 
@@ -198,87 +215,223 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     let header = Row::new(vec![
         Cell::from("Name"),
         Cell::from("State"),
-        Cell::from("Date"),
+        Cell::from("Last opened"),
     ])
     .style(header_style)
     .bottom_margin(1);
 
+    let selected_visual_row = app
+        .selectable_indices
+        .get(app.selected)
+        .copied();
+
+    let mut selectable_row_idx = 0usize;
     let rows: Vec<Row> = app
-        .sessions
+        .display_items
         .iter()
         .enumerate()
-        .map(|(i, session)| {
-            let is_current = app.is_current_session(session);
+        .map(|(_i, item)| match item {
+            ListItem::SectionHeader(title) => {
+                let full_width_name = format!("  {title}");
+                Row::new(vec![
+                    Cell::from(Line::from(Span::styled(
+                        full_width_name,
+                        Style::default()
+                            .fg(SECTION_FG)
+                            .bg(BASE_BG)
+                            .add_modifier(Modifier::BOLD | Modifier::DIM),
+                    ))),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                ])
+                .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
+            }
+            ListItem::TreeDir { name, depth } => {
+                let indent = "  ".repeat(*depth);
+                let display_name = format!("{indent}{name}/");
+                Row::new(vec![
+                    Cell::from(Line::from(Span::styled(
+                        format!("  {display_name}"),
+                        Style::default()
+                            .fg(SECTION_FG)
+                            .bg(BASE_BG)
+                            .add_modifier(Modifier::DIM),
+                    ))),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                ])
+                .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
+            }
+            ListItem::TreeRepo {
+                name,
+                depth,
+                session,
+                ..
+            } => {
+                let bg = if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
+                selectable_row_idx += 1;
 
-            let state_color = match session.state {
-                SessionState::Detached => GREEN,
-                SessionState::Attached => YELLOW,
-            };
+                let indent = "  ".repeat(*depth);
+                let prefix = format!("  {indent}");
+                let avail = name_chars.saturating_sub(prefix.chars().count());
+                let name_text = truncate(name, avail);
+                let has_session = session.is_some();
+                let name_fg = if has_session { GREEN } else { REPO_FG };
 
-            let bg = if i % 2 == 1 { ZEBRA_BG } else { BASE_BG };
-            let name_fg = if is_current { ACCENT } else { FG };
-
-            let prefix = if is_current { "\u{25c6} " } else { "  " };
-            let avail = name_chars.saturating_sub(prefix.chars().count());
-            let name_text = truncate(&session.name, avail);
-
-            let prefix_fg = if is_current { ACCENT } else { FG };
-
-            let name_cell = if !app.search_input.is_empty() {
-                if let Some(positions) = fuzzy_match(&session.name, &app.search_input) {
-                    let max_pos = name_text.chars().count();
-                    let highlight_set: std::collections::HashSet<usize> =
-                        positions.into_iter().filter(|&p| p < max_pos).collect();
-                    let mut spans = vec![Span::styled(
-                        prefix.to_string(),
-                        Style::default().fg(prefix_fg).bg(bg),
-                    )];
-                    let normal_style = Style::default().fg(name_fg).bg(bg);
-                    let match_style = Style::default()
-                        .fg(MATCH_FG)
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD);
-                    let mut current = String::new();
-                    let mut current_is_match = false;
-                    for (ci, ch) in name_text.chars().enumerate() {
-                        let is_match = highlight_set.contains(&ci);
-                        if is_match != current_is_match && !current.is_empty() {
-                            let style = if current_is_match { match_style } else { normal_style };
-                            spans.push(Span::styled(std::mem::take(&mut current), style));
+                let name_cell = if !app.search_input.is_empty() {
+                    if let Some(positions) = fuzzy_match(name, &app.search_input) {
+                        let max_pos = name_text.chars().count();
+                        let highlight_set: std::collections::HashSet<usize> =
+                            positions.into_iter().filter(|&p| p < max_pos).collect();
+                        let mut spans = vec![Span::styled(
+                            prefix.clone(),
+                            Style::default().fg(name_fg).bg(bg),
+                        )];
+                        let normal_style = Style::default().fg(name_fg).bg(bg);
+                        let match_style = Style::default()
+                            .fg(MATCH_FG)
+                            .bg(bg)
+                            .add_modifier(Modifier::BOLD);
+                        let mut current = String::new();
+                        let mut current_is_match = false;
+                        for (ci, ch) in name_text.chars().enumerate() {
+                            let is_match = highlight_set.contains(&ci);
+                            if is_match != current_is_match && !current.is_empty() {
+                                let style =
+                                    if current_is_match { match_style } else { normal_style };
+                                spans.push(Span::styled(std::mem::take(&mut current), style));
+                            }
+                            current.push(ch);
+                            current_is_match = is_match;
                         }
-                        current.push(ch);
-                        current_is_match = is_match;
+                        if !current.is_empty() {
+                            let style =
+                                if current_is_match { match_style } else { normal_style };
+                            spans.push(Span::styled(current, style));
+                        }
+                        Cell::from(Line::from(spans))
+                    } else {
+                        Cell::from(Line::from(vec![
+                            Span::styled(prefix, Style::default().fg(name_fg).bg(bg)),
+                            Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
+                        ]))
                     }
-                    if !current.is_empty() {
-                        let style = if current_is_match { match_style } else { normal_style };
-                        spans.push(Span::styled(current, style));
-                    }
-                    Cell::from(Line::from(spans))
                 } else {
                     Cell::from(Line::from(vec![
-                        Span::styled(prefix.to_string(), Style::default().fg(prefix_fg).bg(bg)),
+                        Span::styled(prefix, Style::default().fg(name_fg).bg(bg)),
                         Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
                     ]))
-                }
-            } else {
-                Cell::from(Line::from(vec![
-                    Span::styled(prefix.to_string(), Style::default().fg(prefix_fg).bg(bg)),
-                    Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
-                ]))
-            };
+                };
 
-            Row::new(vec![
-                name_cell,
-                Cell::from(Span::styled(
-                    session.state.as_str().to_string(),
-                    Style::default().fg(state_color).bg(bg),
-                )),
-                Cell::from(Span::styled(
-                    session.date.clone(),
-                    Style::default().fg(DIM).bg(bg),
-                )),
-            ])
-            .style(Style::default().fg(FG).bg(bg))
+                let (state_text, state_color) = if let Some(ref s) = session {
+                    let color = match s.state {
+                        SessionState::Detached => GREEN,
+                        SessionState::Attached => YELLOW,
+                    };
+                    (s.state.as_str().to_string(), color)
+                } else {
+                    (String::new(), DIM)
+                };
+
+                let date_text = app
+                    .last_opened(name)
+                    .unwrap_or_default();
+
+                Row::new(vec![
+                    name_cell,
+                    Cell::from(Span::styled(
+                        state_text,
+                        Style::default().fg(state_color).bg(bg),
+                    )),
+                    Cell::from(Span::styled(
+                        date_text,
+                        Style::default().fg(DIM).bg(bg),
+                    )),
+                ])
+                .style(Style::default().fg(FG).bg(bg))
+            }
+            ListItem::SessionItem(session) => {
+                let is_current = app.is_current_session(session);
+
+                let state_color = match session.state {
+                    SessionState::Detached => GREEN,
+                    SessionState::Attached => YELLOW,
+                };
+
+                let bg = if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
+                selectable_row_idx += 1;
+                let name_fg = if is_current { ACCENT } else { FG };
+
+                let prefix = if is_current { "\u{25c6} " } else { "  " };
+                let avail = name_chars.saturating_sub(prefix.chars().count());
+                let name_text = truncate(&session.name, avail);
+
+                let prefix_fg = if is_current { ACCENT } else { FG };
+
+                let name_cell = if !app.search_input.is_empty() {
+                    if let Some(positions) = fuzzy_match(&session.name, &app.search_input) {
+                        let max_pos = name_text.chars().count();
+                        let highlight_set: std::collections::HashSet<usize> =
+                            positions.into_iter().filter(|&p| p < max_pos).collect();
+                        let mut spans = vec![Span::styled(
+                            prefix.to_string(),
+                            Style::default().fg(prefix_fg).bg(bg),
+                        )];
+                        let normal_style = Style::default().fg(name_fg).bg(bg);
+                        let match_style = Style::default()
+                            .fg(MATCH_FG)
+                            .bg(bg)
+                            .add_modifier(Modifier::BOLD);
+                        let mut current = String::new();
+                        let mut current_is_match = false;
+                        for (ci, ch) in name_text.chars().enumerate() {
+                            let is_match = highlight_set.contains(&ci);
+                            if is_match != current_is_match && !current.is_empty() {
+                                let style =
+                                    if current_is_match { match_style } else { normal_style };
+                                spans.push(Span::styled(std::mem::take(&mut current), style));
+                            }
+                            current.push(ch);
+                            current_is_match = is_match;
+                        }
+                        if !current.is_empty() {
+                            let style =
+                                if current_is_match { match_style } else { normal_style };
+                            spans.push(Span::styled(current, style));
+                        }
+                        Cell::from(Line::from(spans))
+                    } else {
+                        Cell::from(Line::from(vec![
+                            Span::styled(
+                                prefix.to_string(),
+                                Style::default().fg(prefix_fg).bg(bg),
+                            ),
+                            Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
+                        ]))
+                    }
+                } else {
+                    Cell::from(Line::from(vec![
+                        Span::styled(
+                            prefix.to_string(),
+                            Style::default().fg(prefix_fg).bg(bg),
+                        ),
+                        Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
+                    ]))
+                };
+
+                Row::new(vec![
+                    name_cell,
+                    Cell::from(Span::styled(
+                        session.state.as_str().to_string(),
+                        Style::default().fg(state_color).bg(bg),
+                    )),
+                    Cell::from(Span::styled(
+                        app.last_opened(&session.name).unwrap_or_default(),
+                        Style::default().fg(DIM).bg(bg),
+                    )),
+                ])
+                .style(Style::default().fg(FG).bg(bg))
+            }
         })
         .collect();
 
@@ -288,7 +441,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(DATE_W),
     ];
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(BORDER_FG).bg(BASE_BG))
         .style(Style::default().fg(FG).bg(BASE_BG))
@@ -306,7 +459,14 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
             ),
         ]));
 
-    if rows.is_empty() {
+    if app.filter_opened {
+        block = block.title_bottom(Line::from(Span::styled(
+            " Showing: opened only ",
+            Style::default().fg(MATCH_FG).bg(BASE_BG),
+        )));
+    }
+
+    if app.selectable_indices.is_empty() {
         let msg = if !app.search_input.is_empty() {
             "  No matches"
         } else {
@@ -335,12 +495,25 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     .bg(HIGHLIGHT_BG)
                     .add_modifier(Modifier::BOLD),
             )
-            .highlight_symbol("\u{25b6} ");
+            .highlight_symbol("\u{2588} ");
 
         let mut state = TableState::default();
-        state.select(Some(app.selected));
+        state.select(selected_visual_row);
 
         f.render_stateful_widget(table, area, &mut state);
+
+        // Scrollbar
+        let visible_rows = area.height.saturating_sub(4) as usize; // borders + header + header margin
+        if app.selectable_indices.len() > visible_rows {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(Style::default().fg(ACCENT))
+                .track_style(Style::default().fg(Color::Rgb(40, 40, 60)));
+            let mut scrollbar_state = ScrollbarState::new(app.selectable_indices.len())
+                .position(app.selected);
+            f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+        }
     }
 }
 
@@ -369,7 +542,7 @@ fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(MATCH_FG).bg(SEARCH_BG),
         ),
         Span::styled(
-            format!("  ({} matches)", app.sessions.len()),
+            format!("  ({} matches)", app.selectable_indices.len()),
             Style::default().fg(COUNT_FG).bg(SEARCH_BG),
         ),
     ]);
@@ -395,9 +568,12 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
                     .fg(FG_BRIGHT)
                     .add_modifier(Modifier::BOLD),
             ),
-            format!(
-                " q:Quit  j/k:Nav  Enter:Attach  c:Create  n:Rename  x:Kill{home_hint}  /:Search  r:Refresh  ?:Legend "
-            ),
+            {
+                let filter_hint = if app.filter_opened { "  o:All" } else { "  o:Opened" };
+                format!(
+                    " q:Quit  j/k:Nav  g/G:Top/Bot  Enter:Attach  c:Create  x:Kill{home_hint}  /:Search{filter_hint}  ?:Legend "
+                )
+            },
         ),
         Mode::Searching => (
             Span::styled(
@@ -426,9 +602,13 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 hint.to_string(),
             )
         }
-        Mode::ConfirmKill => (
+        Mode::ConfirmKill | Mode::ConfirmKillAll1 | Mode::ConfirmKillAll2 | Mode::ConfirmQuit => (
             Span::styled(
-                " KILL ",
+                match app.mode {
+                    Mode::ConfirmKill => " KILL ",
+                    Mode::ConfirmKillAll1 | Mode::ConfirmKillAll2 => " KILL ALL ",
+                    _ => " QUIT ",
+                },
                 Style::default()
                     .bg(MODE_KILL_BG)
                     .fg(FG_BRIGHT)
@@ -510,7 +690,7 @@ fn draw_create_modal(f: &mut Frame, app: &App) {
     );
 }
 
-// ── Kill confirmation modal ─────────────────────────────────
+// ── Rename modal ────────────────────────────────────────────
 
 fn draw_rename_modal(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -557,10 +737,13 @@ fn draw_rename_modal(f: &mut Frame, app: &App) {
     );
 }
 
+// ── Kill confirmation modal ─────────────────────────────────
+
 fn draw_kill_modal(f: &mut Frame, app: &App) {
     let session_name = app
-        .selected_session()
-        .map(|s| s.name.clone())
+        .kill_session_info
+        .as_ref()
+        .map(|(name, _)| name.clone())
         .unwrap_or_default();
 
     let area = f.area();
@@ -600,6 +783,137 @@ fn draw_kill_modal(f: &mut Frame, app: &App) {
 
     f.render_widget(
         Paragraph::new(lines).style(Style::default().fg(FG).bg(KILL_BG)),
+        inner,
+    );
+}
+
+// ── Kill-all confirmation modals ─────────────────────────────
+
+fn draw_kill_all_modal_1(f: &mut Frame, app: &App) {
+    let count = app.all_sessions.len();
+    let area = f.area();
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(KILL_BORDER).bg(KILL_BG))
+        .style(Style::default().fg(FG).bg(KILL_BG))
+        .title(Span::styled(
+            " Kill All Sessions ",
+            Style::default()
+                .fg(KILL_TITLE)
+                .bg(KILL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" Kill all {count} sessions?"),
+            Style::default().fg(FG_BRIGHT).bg(KILL_BG),
+        )),
+        Line::from(Span::styled(
+            " y/Enter: confirm  n/Esc: cancel",
+            Style::default().fg(DIM).bg(KILL_BG),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(KILL_BG)),
+        inner,
+    );
+}
+
+fn draw_kill_all_modal_2(f: &mut Frame) {
+    let area = f.area();
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(KILL_BORDER).bg(KILL_BG))
+        .style(Style::default().fg(FG).bg(KILL_BG))
+        .title(Span::styled(
+            " Are you sure? ",
+            Style::default()
+                .fg(KILL_TITLE)
+                .bg(KILL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            " This cannot be undone.",
+            Style::default().fg(FG_BRIGHT).bg(KILL_BG),
+        )),
+        Line::from(Span::styled(
+            " y/Enter: kill all  n/Esc: cancel",
+            Style::default().fg(DIM).bg(KILL_BG),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(KILL_BG)),
+        inner,
+    );
+}
+
+// ── Quit confirmation modal ──────────────────────────────────
+
+fn draw_quit_modal(f: &mut Frame) {
+    let area = f.area();
+    let width = 40u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            " Quit ",
+            Style::default()
+                .fg(MODAL_TITLE)
+                .bg(MODAL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            " Quit scrn?",
+            Style::default().fg(FG_BRIGHT).bg(MODAL_BG),
+        )),
+        Line::from(Span::styled(
+            " y/Enter: confirm  n/Esc: cancel",
+            Style::default().fg(DIM).bg(MODAL_BG),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
         inner,
     );
 }
@@ -690,10 +1004,13 @@ fn draw_attached(f: &mut Frame, app: &App) {
         }
     }
 
-    // Draw the bordered box (same style as the session table)
+    let is_two_pane = app.pty_right.is_some();
+
+    // Draw the bordered box
+    let border_fg = if is_two_pane { BORDER_FG } else { BORDER_FG };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(BORDER_FG).bg(BASE_BG))
+        .border_style(Style::default().fg(border_fg).bg(BASE_BG))
         .style(Style::default().fg(FG).bg(BASE_BG))
         .title(Line::from(vec![
             Span::styled(
@@ -712,49 +1029,143 @@ fn draw_attached(f: &mut Frame, app: &App) {
     let inner = block.inner(box_area);
     f.render_widget(block, box_area);
 
-    // Mark PTY inner area cells as skip — we render them directly to the
-    // terminal after ratatui's draw, bypassing crossterm's color conversion.
-    let buf = f.buffer_mut();
-    for y in inner.top()..inner.bottom() {
-        for x in inner.left()..inner.right() {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.skip = true;
+    if is_two_pane {
+        // Two-pane: split inner area 60% | 1-col separator | 40%
+        let total_w = inner.width;
+        let left_w = (total_w.saturating_sub(1)) * 60 / 100;
+        let right_w = total_w.saturating_sub(1).saturating_sub(left_w);
+
+        let left_area = Rect::new(inner.x, inner.y, left_w, inner.height);
+        let sep_x = inner.x + left_w;
+        let right_area = Rect::new(sep_x + 1, inner.y, right_w, inner.height);
+
+        // Draw vertical separator
+        let buf = f.buffer_mut();
+        for y in inner.top()..inner.bottom() {
+            if let Some(cell) = buf.cell_mut((sep_x, y)) {
+                cell.set_fg(SEPARATOR_FG);
+                cell.set_bg(BASE_BG);
+                cell.set_symbol("\u{2502}"); // │
+            }
+        }
+
+        // Draw active pane indicator at top of separator
+        if let Some(cell) = buf.cell_mut((sep_x, inner.top())) {
+            match app.active_pane {
+                Pane::Left => {
+                    cell.set_fg(ACTIVE_BORDER_FG);
+                    cell.set_symbol("\u{2524}"); // ┤
+                }
+                Pane::Right => {
+                    cell.set_fg(ACTIVE_BORDER_FG);
+                    cell.set_symbol("\u{251c}"); // ├
+                }
+            }
+        }
+
+        // Mark left pane cells as skip
+        let buf = f.buffer_mut();
+        for y in left_area.top()..left_area.bottom() {
+            for x in left_area.left()..left_area.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.skip = true;
+                }
+            }
+        }
+
+        // Mark right pane cells as skip
+        for y in right_area.top()..right_area.bottom() {
+            for x in right_area.left()..right_area.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.skip = true;
+                }
+            }
+        }
+    } else {
+        // Single pane: mark inner area cells as skip
+        let buf = f.buffer_mut();
+        for y in inner.top()..inner.bottom() {
+            for x in inner.left()..inner.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.skip = true;
+                }
             }
         }
     }
 
-    // Don't call set_cursor_position here — we handle cursor in
-    // render_pty_direct to avoid jumping during the direct write.
-
     // Status bar
-    let line = Line::from(vec![
-        Span::styled(
-            " ATTACHED ",
-            Style::default()
-                .bg(MODE_CREATE_BG)
-                .fg(MODE_DARK_FG)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(" {} ", app.attached_name),
-            Style::default().fg(FG_BRIGHT).bg(BASE_BG),
-        ),
-        Span::styled(
-            " Esc Esc:Back  Ctrl+A,D:Detach ",
-            Style::default().fg(HELP_FG).bg(BASE_BG),
-        ),
-    ]);
-    f.render_widget(
-        Paragraph::new(line).style(Style::default().fg(FG).bg(BASE_BG)),
-        status_area,
-    );
+    if is_two_pane {
+        let pane_label = match app.active_pane {
+            Pane::Left => "Left",
+            Pane::Right => "Right",
+        };
+        let line = Line::from(vec![
+            Span::styled(
+                " ATTACHED ",
+                Style::default()
+                    .bg(MODE_CREATE_BG)
+                    .fg(MODE_DARK_FG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {} ({}) ", app.attached_name, pane_label),
+                Style::default().fg(FG_BRIGHT).bg(BASE_BG),
+            ),
+            Span::styled(
+                " Ctrl+S:Swap Pane  Esc Esc:Back ",
+                Style::default().fg(HELP_FG).bg(BASE_BG),
+            ),
+        ]);
+        f.render_widget(
+            Paragraph::new(line).style(Style::default().fg(FG).bg(BASE_BG)),
+            status_area,
+        );
+    } else {
+        let line = Line::from(vec![
+            Span::styled(
+                " ATTACHED ",
+                Style::default()
+                    .bg(MODE_CREATE_BG)
+                    .fg(MODE_DARK_FG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {} ", app.attached_name),
+                Style::default().fg(FG_BRIGHT).bg(BASE_BG),
+            ),
+            Span::styled(
+                " Esc Esc:Back  Ctrl+A,D:Detach ",
+                Style::default().fg(HELP_FG).bg(BASE_BG),
+            ),
+        ]);
+        f.render_widget(
+            Paragraph::new(line).style(Style::default().fg(FG).bg(BASE_BG)),
+            status_area,
+        );
+    }
 }
 
-/// Render PTY content directly to the terminal, bypassing ratatui/crossterm.
+/// Compute two-pane layout geometry for render_pty_direct calls.
+/// Returns (left_x, left_w, right_x, right_w, inner_y, inner_h)
+pub fn two_pane_geometry(cols: u16, rows: u16) -> (u16, u16, u16, u16, u16, u16) {
+    let inner_x = 1u16;
+    let inner_y = 1u16;
+    let inner_w = cols.saturating_sub(2);
+    let inner_h = rows.saturating_sub(3);
+
+    let left_w = (inner_w.saturating_sub(1)) * 60 / 100;
+    let right_w = inner_w.saturating_sub(1).saturating_sub(left_w);
+    let left_x = inner_x;
+    let right_x = inner_x + left_w + 1; // +1 for separator
+
+    (left_x, left_w, right_x, right_w, inner_y, inner_h)
+}
+
+/// Render PTY cell content directly to the terminal, bypassing ratatui.
 ///
-/// Reads each cell from vt100 and emits ANSI escape codes directly.
-/// Default fg/bg are mapped to scrn's theme colors so the PTY area
-/// blends visually with the surrounding border.
+/// This function ONLY writes cell content — no cursor hide/show.
+/// Cursor visibility is managed by the caller at the frame level to
+/// avoid flicker from repeated hide/show cycles.
 pub fn render_pty_direct(
     w: &mut impl Write,
     screen: &vt100::Screen,
@@ -766,11 +1177,7 @@ pub fn render_pty_direct(
     let (scr_rows, scr_cols) = screen.size();
     let mut buf = Vec::with_capacity(inner_w as usize * inner_h as usize * 8);
 
-    // Hide cursor while we write to prevent visible jumping
-    buf.extend_from_slice(b"\x1b[?25l");
-
     for row in 0..inner_h.min(scr_rows) {
-        // Position cursor at start of this row (1-based ANSI coordinates)
         write!(buf, "\x1b[{};{}H", inner_y + row + 1, inner_x + 1)?;
 
         let mut prev: Option<CellStyle> = None;
@@ -796,7 +1203,6 @@ pub fn render_pty_direct(
             }
         }
 
-        // Fill remaining columns (if PTY narrower than inner area)
         let filled = inner_w.min(scr_cols);
         if filled < inner_w {
             let fill_style = CellStyle::default_cell();
@@ -809,7 +1215,6 @@ pub fn render_pty_direct(
         }
     }
 
-    // Fill remaining rows (if PTY shorter than inner area)
     let filled_rows = inner_h.min(scr_rows);
     if filled_rows < inner_h {
         let fill_style = CellStyle::default_cell();
@@ -822,18 +1227,28 @@ pub fn render_pty_direct(
         }
     }
 
-    // Reset attributes and position cursor
     buf.extend_from_slice(b"\x1b[0m");
+    w.write_all(&buf)
+}
 
+/// Position the terminal cursor at the PTY app's cursor location and show it,
+/// but only if the PTY app itself wants the cursor visible.
+///
+/// Call this ONCE per frame, after all render_pty_direct calls, for the active pane.
+pub fn write_pty_cursor(
+    w: &mut impl Write,
+    screen: &vt100::Screen,
+    inner_x: u16,
+    inner_y: u16,
+) -> std::io::Result<()> {
+    if screen.hide_cursor() {
+        // PTY app (e.g. lazygit during render) wants cursor hidden — respect it
+        return Ok(());
+    }
     let (cr, cc) = screen.cursor_position();
-    let cursor_x = inner_x + cc + 1; // 1-based
+    let cursor_x = inner_x + cc + 1;
     let cursor_y = inner_y + cr + 1;
-    write!(buf, "\x1b[{};{}H", cursor_y, cursor_x)?;
-    // Show cursor
-    buf.extend_from_slice(b"\x1b[?25h");
-
-    w.write_all(&buf)?;
-    w.flush()
+    write!(w, "\x1b[{};{}H\x1b[?25h", cursor_y, cursor_x)
 }
 
 #[derive(PartialEq)]
@@ -871,11 +1286,7 @@ impl CellStyle {
 }
 
 fn write_sgr(buf: &mut Vec<u8>, s: &CellStyle) -> std::io::Result<()> {
-    // For cells with inverse, we do the color swap ourselves so that
-    // Default colors map to our theme correctly. The terminal's \e[7m
-    // would swap the ANSI "default" colors (white/black), not our theme.
     if s.inverse {
-        // Swap fg/bg: display bg-color as text, fg-color as background
         buf.extend_from_slice(b"\x1b[0");
         if s.bold {
             buf.extend_from_slice(b";1");
@@ -886,7 +1297,6 @@ fn write_sgr(buf: &mut Vec<u8>, s: &CellStyle) -> std::io::Result<()> {
         if s.underline {
             buf.extend_from_slice(b";4");
         }
-        // Emit swapped colors: bg→fg, fg→bg
         write_color(buf, s.bg, true)?;
         write_color(buf, s.fg, false)?;
         buf.push(b'm');
@@ -911,7 +1321,6 @@ fn write_sgr(buf: &mut Vec<u8>, s: &CellStyle) -> std::io::Result<()> {
 fn write_color(buf: &mut Vec<u8>, color: vt100::Color, is_fg: bool) -> std::io::Result<()> {
     match color {
         vt100::Color::Default => {
-            // Map Default to scrn's theme colors so PTY blends with border
             if is_fg {
                 buf.extend_from_slice(b";38;2;220;220;230");
             } else {
@@ -919,11 +1328,9 @@ fn write_color(buf: &mut Vec<u8>, color: vt100::Color, is_fg: bool) -> std::io::
             }
         }
         vt100::Color::Idx(i) if i < 8 => {
-            // Standard ANSI: \e[30-37m / \e[40-47m
             write!(buf, ";{}", if is_fg { 30 + i as u16 } else { 40 + i as u16 })?;
         }
         vt100::Color::Idx(i) if i < 16 => {
-            // Bright ANSI: \e[90-97m / \e[100-107m
             write!(
                 buf,
                 ";{}",
@@ -935,7 +1342,6 @@ fn write_color(buf: &mut Vec<u8>, color: vt100::Color, is_fg: bool) -> std::io::
             )?;
         }
         vt100::Color::Idx(i) => {
-            // 256-color: \e[38;5;Nm / \e[48;5;Nm
             write!(buf, ";{};5;{}", if is_fg { 38 } else { 48 }, i)?;
         }
         vt100::Color::Rgb(r, g, b) => {
@@ -944,5 +1350,3 @@ fn write_color(buf: &mut Vec<u8>, color: vt100::Color, is_fg: bool) -> std::io::
     }
     Ok(())
 }
-
-

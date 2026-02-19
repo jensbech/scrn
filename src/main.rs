@@ -1,11 +1,13 @@
 mod app;
+mod config;
 mod pty;
 mod screen;
 mod shell;
 mod ui;
+mod workspace;
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -18,7 +20,7 @@ use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{Action, App, Mode};
+use app::{Action, App, Mode, Pane};
 
 fn input_insert(s: &mut String, cursor: &mut usize, c: char) {
     let bp = s
@@ -73,19 +75,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Parse --action-file flag
+    // Parse flags
     let mut action_file = None;
+    let mut cli_workspace = None;
     let mut i = 1;
     while i < args.len() {
-        if args[i] == "--action-file" {
-            if let Some(path) = args.get(i + 1) {
-                action_file = Some(path.clone());
-                i += 2;
-                continue;
+        match args[i].as_str() {
+            "--action-file" => {
+                if let Some(path) = args.get(i + 1) {
+                    action_file = Some(path.clone());
+                    i += 2;
+                    continue;
+                }
             }
+            "--workspace" | "-w" => {
+                if let Some(path) = args.get(i + 1) {
+                    cli_workspace = Some(path.clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            _ => {}
         }
         i += 1;
     }
+
+    let cfg = config::Config::load(cli_workspace.as_deref());
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
@@ -95,47 +110,137 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     terminal.clear()?;
 
-    let mut app = App::new(action_file);
+    let mut app = App::new(action_file, cfg.workspace);
     app.refresh_sessions();
 
     let exit_action;
     let mut last_esc: Option<Instant> = None;
 
+    // Track whether PTY content needs re-rendering (dirty = new data or resize)
+    let mut pty_needs_render = false;
+    // Track when UI chrome (border/status bar) needs redrawing via ratatui
+    let mut ui_needs_draw = false;
+    // Rate-limit rendering — accumulate PTY data between frames
+    let mut last_render = Instant::now();
+    const FRAME_BUDGET: Duration = Duration::from_millis(8); // ~120fps max
+
     loop {
-        // Read PTY output before drawing (so display is up to date)
+        // ── 1. Drain PTY output (fast — just memcpy + vt100 parse) ──
         if app.mode == Mode::Attached {
-            let should_detach = if let Some(ref mut pty) = app.pty_session {
-                pty.try_read();
-                !pty.is_running()
+            let (left_dirty, should_detach) = if let Some(ref mut pty) = app.pty_session {
+                let dirty = pty.try_read();
+                (dirty, !pty.is_running())
             } else {
-                true
+                (false, true)
             };
+
+            let right_dirty = if let Some(ref mut pty_right) = app.pty_right {
+                let dirty = pty_right.try_read();
+                if !pty_right.is_running() {
+                    app.detach_pty();
+                    continue;
+                }
+                dirty
+            } else {
+                false
+            };
+
             if should_detach {
                 app.detach_pty();
             }
+
+            pty_needs_render = pty_needs_render || left_dirty || right_dirty;
         }
 
-        terminal.draw(|f| ui::draw(f, &app))?;
-
-        // Render PTY content directly to the terminal, bypassing ratatui/crossterm.
-        // This preserves exact ANSI color codes that terminals expect.
+        // ── 2. Render (rate-limited, skip ratatui on PTY-only frames) ──
         if app.mode == Mode::Attached {
-            if let Some(ref pty) = app.pty_session {
+            let render_due = last_render.elapsed() >= FRAME_BUDGET;
+            if (pty_needs_render || ui_needs_draw) && render_due {
+                // Begin synchronized output + hide cursor
+                write!(terminal.backend_mut(), "\x1b[?2026h\x1b[?25l")?;
+
+                // Only call ratatui draw when UI chrome needs updating
+                // (first frame, resize, pane swap). Skipping this on normal
+                // frames avoids buffer management + diff + 2 flushes.
+                if ui_needs_draw {
+                    terminal.draw(|f| ui::draw(f, &app))?;
+                    ui_needs_draw = false;
+                }
+
+                // Render PTY cells + cursor directly
                 let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-                // Inner area = full area minus 1-cell border on each side minus status bar
-                let inner_x = 1u16;
-                let inner_y = 1u16;
-                let inner_w = cols.saturating_sub(2);
-                let inner_h = rows.saturating_sub(3);
-                ui::render_pty_direct(
-                    terminal.backend_mut(),
-                    pty.screen(),
-                    inner_x,
-                    inner_y,
-                    inner_w,
-                    inner_h,
-                )?;
+
+                if app.pty_right.is_some() {
+                    let (left_x, left_w, right_x, right_w, inner_y, inner_h) =
+                        ui::two_pane_geometry(cols, rows);
+
+                    if pty_needs_render {
+                        if let Some(ref pty) = app.pty_session {
+                            ui::render_pty_direct(
+                                terminal.backend_mut(),
+                                pty.screen(),
+                                left_x,
+                                inner_y,
+                                left_w,
+                                inner_h,
+                            )?;
+                        }
+                        if let Some(ref pty) = app.pty_right {
+                            ui::render_pty_direct(
+                                terminal.backend_mut(),
+                                pty.screen(),
+                                right_x,
+                                inner_y,
+                                right_w,
+                                inner_h,
+                            )?;
+                        }
+                    }
+
+                    let (cursor_x, cursor_screen) = match app.active_pane {
+                        Pane::Left => (left_x, app.pty_session.as_ref().map(|p| p.screen())),
+                        Pane::Right => (right_x, app.pty_right.as_ref().map(|p| p.screen())),
+                    };
+                    if let Some(screen) = cursor_screen {
+                        ui::write_pty_cursor(terminal.backend_mut(), screen, cursor_x, inner_y)?;
+                    }
+                } else {
+                    let inner_x = 1u16;
+                    let inner_y = 1u16;
+                    let inner_w = cols.saturating_sub(2);
+                    let inner_h = rows.saturating_sub(3);
+
+                    if pty_needs_render {
+                        if let Some(ref pty) = app.pty_session {
+                            ui::render_pty_direct(
+                                terminal.backend_mut(),
+                                pty.screen(),
+                                inner_x,
+                                inner_y,
+                                inner_w,
+                                inner_h,
+                            )?;
+                        }
+                    }
+
+                    if let Some(ref pty) = app.pty_session {
+                        ui::write_pty_cursor(
+                            terminal.backend_mut(),
+                            pty.screen(),
+                            inner_x,
+                            inner_y,
+                        )?;
+                    }
+                }
+
+                // End synchronized output — terminal renders the whole frame at once
+                write!(terminal.backend_mut(), "\x1b[?2026l")?;
+                terminal.backend_mut().flush()?;
+                pty_needs_render = false;
+                last_render = Instant::now();
             }
+        } else {
+            terminal.draw(|f| ui::draw(f, &app))?;
         }
 
         // Auto-clear stale status messages (only in list view)
@@ -155,9 +260,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Action::None => {}
         }
 
-        // Poll faster when attached (smooth terminal), slower for list view
+        // ── 3. Poll for input ──
+        // When PTY data is pending but render isn't due yet, sleep just
+        // long enough until the next frame. Otherwise idle at frame rate.
         let poll_duration = if app.mode == Mode::Attached {
-            Duration::from_millis(16)
+            if pty_needs_render {
+                FRAME_BUDGET
+                    .saturating_sub(last_render.elapsed())
+                    .max(Duration::from_millis(1))
+            } else {
+                FRAME_BUDGET
+            }
         } else {
             Duration::from_millis(100)
         };
@@ -172,36 +285,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 last_esc = None;
                                 app.detach_pty();
                             } else {
-                                // First Esc — forward to PTY and start timer
+                                // First Esc — forward to active pane PTY and start timer
                                 last_esc = Some(Instant::now());
-                                if let Some(ref pty_session) = app.pty_session {
-                                    pty_session.write_all(&[0x1b]);
+                                let active_pty = match app.active_pane {
+                                    Pane::Left => app.pty_session.as_ref(),
+                                    Pane::Right => app.pty_right.as_ref(),
+                                };
+                                if let Some(pty) = active_pty {
+                                    pty.write_all(&[0x1b]);
                                 }
                             }
+                        } else if key.code == KeyCode::F(6)
+                            || (key.code == KeyCode::Char('s')
+                                && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL))
+                        {
+                            // F6 / Ctrl+S — swap active pane
+                            last_esc = None;
+                            app.swap_pane();
+                            ui_needs_draw = true;
                         } else {
                             last_esc = None;
-                            // Forward everything else to the PTY
+                            // Forward everything else to the active pane's PTY
                             let bytes = pty::key_to_bytes(&key);
-                            if let Some(ref pty_session) = app.pty_session {
-                                pty_session.write_all(&bytes);
+                            let active_pty = match app.active_pane {
+                                Pane::Left => app.pty_session.as_ref(),
+                                Pane::Right => app.pty_right.as_ref(),
+                            };
+                            if let Some(pty) = active_pty {
+                                pty.write_all(&bytes);
                             }
                         }
                     }
                     Mode::Normal => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            exit_action = Action::None;
-                            break;
+                        KeyCode::Esc => {
+                            if !app.search_input.is_empty() {
+                                app.clear_search();
+                            } else {
+                                app.mode = Mode::ConfirmQuit;
+                            }
+                        }
+                        KeyCode::Char('q') => {
+                            app.mode = Mode::ConfirmQuit;
                         }
                         KeyCode::Up | KeyCode::Char('k') => app.move_up(),
                         KeyCode::Down | KeyCode::Char('j') => app.move_down(),
+                        KeyCode::Char('g') => app.move_to_top(),
+                        KeyCode::Char('G') => app.move_to_bottom(),
+                        KeyCode::Char('o') => app.toggle_opened_filter(),
                         KeyCode::Enter => {
                             let (cols, rows) =
                                 crossterm::terminal::size().unwrap_or((80, 24));
                             app.attach_selected(rows, cols);
+                            if app.mode == Mode::Attached {
+                                pty_needs_render = true;
+                                ui_needs_draw = true;
+                            }
                         }
                         KeyCode::Char('c') => app.start_create(),
                         KeyCode::Char('n') => app.start_rename(),
                         KeyCode::Char('x') => app.start_kill(),
+                        KeyCode::Char('X') => app.start_kill_all(),
                         KeyCode::Char('d') => app.go_home(),
                         KeyCode::Char('/') => app.start_search(),
                         KeyCode::Char('r') => app.refresh_sessions(),
@@ -270,6 +413,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('n') | KeyCode::Esc => app.cancel_kill(),
                         _ => {}
                     },
+                    Mode::ConfirmKillAll1 => match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => app.confirm_kill_all_step1(),
+                        KeyCode::Char('n') | KeyCode::Esc => app.cancel_kill_all(),
+                        _ => {}
+                    },
+                    Mode::ConfirmKillAll2 => match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => app.confirm_kill_all_step2(),
+                        KeyCode::Char('n') | KeyCode::Esc => app.cancel_kill_all(),
+                        _ => {}
+                    },
+                    Mode::ConfirmQuit => match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => {
+                            exit_action = Action::None;
+                            break;
+                        }
+                        KeyCode::Char('n') | KeyCode::Esc => {
+                            app.mode = Mode::Normal;
+                        }
+                        _ => {}
+                    },
                 },
                 Event::Mouse(mouse) if app.mode != Mode::Attached => match mouse.kind {
                     MouseEventKind::ScrollUp => app.move_up(),
@@ -279,6 +442,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Resize(cols, rows) => {
                     if app.mode == Mode::Attached {
                         app.resize_pty(rows, cols);
+                        pty_needs_render = true;
+                        ui_needs_draw = true;
                     }
                 }
                 _ => {}

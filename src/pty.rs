@@ -2,6 +2,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -13,6 +14,26 @@ pub struct PtySession {
 
 impl PtySession {
     pub fn spawn(program: &str, args: &[&str], rows: u16, cols: u16) -> io::Result<Self> {
+        Self::spawn_inner(program, args, rows, cols, None)
+    }
+
+    pub fn spawn_in_dir(
+        program: &str,
+        args: &[&str],
+        rows: u16,
+        cols: u16,
+        dir: &std::path::Path,
+    ) -> io::Result<Self> {
+        Self::spawn_inner(program, args, rows, cols, Some(dir))
+    }
+
+    fn spawn_inner(
+        program: &str,
+        args: &[&str],
+        rows: u16,
+        cols: u16,
+        dir: Option<&std::path::Path>,
+    ) -> io::Result<Self> {
         let (master, slave) = open_pty()?;
         set_pty_size(master.as_raw_fd(), rows, cols);
         set_nonblocking(master.as_raw_fd())?;
@@ -21,12 +42,17 @@ impl PtySession {
         let dup1 = dup_fd(slave_raw)?;
         let dup2 = dup_fd(slave_raw)?;
 
+        let mut cmd = Command::new(program);
+        cmd.args(args)
+            .env("TERM", "xterm-256color")
+            .env("COLORTERM", "truecolor")
+            .env_remove("STY")
+            .env_remove("WINDOW");
+        if let Some(dir) = dir {
+            cmd.current_dir(dir);
+        }
         let child = unsafe {
-            Command::new(program)
-                .args(args)
-                .env("TERM", "xterm-256color")
-                .env("COLORTERM", "truecolor")
-                .stdin(Stdio::from_raw_fd(slave_raw))
+            cmd.stdin(Stdio::from_raw_fd(slave_raw))
                 .stdout(Stdio::from_raw_fd(dup1))
                 .stderr(Stdio::from_raw_fd(dup2))
                 .pre_exec(|| {
@@ -45,8 +71,10 @@ impl PtySession {
     }
 
     /// Read any available output from the PTY (non-blocking).
-    pub fn try_read(&mut self) {
-        let mut buf = [0u8; 8192];
+    /// Returns `true` if any data was read (screen may have changed).
+    pub fn try_read(&mut self) -> bool {
+        let mut any = false;
+        let mut buf = [0u8; 65536];
         loop {
             let n = unsafe {
                 libc::read(
@@ -57,10 +85,12 @@ impl PtySession {
             };
             if n > 0 {
                 self.parser.process(&buf[..n as usize]);
+                any = true;
             } else {
                 break;
             }
         }
+        any
     }
 
     /// Send input bytes to the PTY.
@@ -96,6 +126,23 @@ impl PtySession {
 
 impl Drop for PtySession {
     fn drop(&mut self) {
+        // Already exited (e.g. after screen detach) — just reap
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        // SIGTERM for graceful shutdown (lets screen clean up its socket)
+        unsafe {
+            libc::kill(self.child.id() as i32, libc::SIGTERM);
+        }
+        // Brief wait for clean exit
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while Instant::now() < deadline {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Force kill as last resort
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
