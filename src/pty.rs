@@ -122,6 +122,11 @@ impl PtySession {
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
     }
+
+    /// Raw file descriptor for the PTY master (for multiplexed poll).
+    pub fn master_fd(&self) -> i32 {
+        self.master.as_raw_fd()
+    }
 }
 
 impl Drop for PtySession {

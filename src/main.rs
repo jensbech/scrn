@@ -22,6 +22,32 @@ use ratatui::Terminal;
 
 use app::{Action, App, Mode, Pane};
 
+/// Poll stdin and PTY file descriptors simultaneously.
+/// Returns (stdin_ready, pty_ready) so the caller can drain PTY data
+/// immediately instead of waiting for the crossterm poll timeout.
+fn poll_fds(pty_fds: &[i32], timeout_ms: i32) -> (bool, bool) {
+    let mut fds: Vec<libc::pollfd> = Vec::with_capacity(1 + pty_fds.len());
+    fds.push(libc::pollfd {
+        fd: 0, // STDIN_FILENO
+        events: libc::POLLIN,
+        revents: 0,
+    });
+    for &fd in pty_fds {
+        fds.push(libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
+    let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+    if ret <= 0 {
+        return (false, false);
+    }
+    let stdin_ready = fds[0].revents & libc::POLLIN != 0;
+    let pty_ready = fds[1..].iter().any(|f| f.revents & libc::POLLIN != 0);
+    (stdin_ready, pty_ready)
+}
+
 fn input_insert(s: &mut String, cursor: &mut usize, c: char) {
     let bp = s
         .char_indices()
@@ -124,6 +150,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_render = Instant::now();
     const FRAME_BUDGET: Duration = Duration::from_millis(8); // ~120fps max
 
+    // Cache terminal size to avoid an ioctl syscall every frame
+    let (mut term_cols, mut term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+
     loop {
         // ── 1. Drain PTY output (fast — just memcpy + vt100 parse) ──
         if app.mode == Mode::Attached {
@@ -168,7 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // Render PTY cells + cursor directly
-                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                let (cols, rows) = (term_cols, term_rows);
 
                 if app.pty_right.is_some() {
                     let (left_x, left_w, right_x, right_w, inner_y, inner_h) =
@@ -261,8 +290,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // ── 3. Poll for input ──
-        // When PTY data is pending but render isn't due yet, sleep just
-        // long enough until the next frame. Otherwise idle at frame rate.
+        // In attached mode, use poll(2) to multiplex stdin + PTY master fds
+        // so we wake immediately when PTY data arrives instead of waiting
+        // for the crossterm poll timeout (~8ms). This cuts perceived latency
+        // roughly in half for full-screen apps.
         let poll_duration = if app.mode == Mode::Attached {
             if pty_needs_render {
                 FRAME_BUDGET
@@ -275,7 +306,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Duration::from_millis(100)
         };
 
-        if event::poll(poll_duration)? {
+        let has_event = if app.mode == Mode::Attached {
+            // Check for already-buffered crossterm events first
+            if event::poll(Duration::ZERO)? {
+                true
+            } else {
+                // Multiplex: wait for stdin OR PTY data, whichever first
+                let mut pty_fds = Vec::with_capacity(2);
+                if let Some(ref pty) = app.pty_session {
+                    pty_fds.push(pty.master_fd());
+                }
+                if let Some(ref pty) = app.pty_right {
+                    pty_fds.push(pty.master_fd());
+                }
+                let timeout_ms = poll_duration.as_millis() as i32;
+                poll_fds(&pty_fds, timeout_ms);
+                // If stdin got data, crossterm will see it
+                event::poll(Duration::ZERO)?
+            }
+        } else {
+            event::poll(poll_duration)?
+        };
+
+        if has_event {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match app.mode {
                     Mode::Attached => {
@@ -333,8 +386,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('G') => app.move_to_bottom(),
                         KeyCode::Char('o') => app.toggle_opened_filter(),
                         KeyCode::Enter => {
-                            let (cols, rows) =
-                                crossterm::terminal::size().unwrap_or((80, 24));
+                            let (cols, rows) = (term_cols, term_rows);
                             app.attach_selected(rows, cols);
                             if app.mode == Mode::Attached {
                                 pty_needs_render = true;
@@ -440,6 +492,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     _ => {}
                 },
                 Event::Resize(cols, rows) => {
+                    term_cols = cols;
+                    term_rows = rows;
                     if app.mode == Mode::Attached {
                         app.resize_pty(rows, cols);
                         pty_needs_render = true;
