@@ -21,4 +21,4 @@ this is an optional feature with the -w flag usage.
 - should lazy load the new screens: only create them once clicked.
 - currently i think there is a bug in which the screen not saved when going back (it closes i think).
 
-should optionally be able to supply some other worskapce (an additional flag -d (directory) to have a second tree (underneath the first, at the bottom) which will screen at all folders recursive. this way i can have some "common folders" playgrounds where i do stuff like pulumi cli that needs some folders to run there in that context.
+Also, each screen in the tui when using the WS feature should actually be two screens (behind the scenes) at the same location, but split in a 60%/40% two-pane view. so that we have two screens for the same location .And a hotkey to swap between which vertically seperated pane we are working on.
