@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -36,13 +36,13 @@ pub enum ListItem {
     SessionItem(Session),
     TreeDir {
         name: String,
-        depth: usize,
+        prefix: String,
     },
     TreeRepo {
         name: String,
         path: PathBuf,
-        depth: usize,
         session: Option<Session>,
+        prefix: String,
     },
 }
 
@@ -74,6 +74,10 @@ pub struct App {
     /// session name -> unix timestamp of last attach
     pub history: HashMap<String, u64>,
     pub filter_opened: bool,
+    /// session name -> has new output since last detach
+    pub activity: HashMap<String, bool>,
+    /// pinned session/repo names — always shown at top
+    pub pins: HashSet<String>,
 }
 
 impl App {
@@ -105,6 +109,8 @@ impl App {
             kill_session_info: None,
             history: load_history(),
             filter_opened: false,
+            activity: HashMap::new(),
+            pins: load_pins(),
         }
     }
 
@@ -121,6 +127,7 @@ impl App {
             self.workspace_tree = Some(workspace::scan_tree(dir));
         }
         save_sessions(&self.all_sessions, &self.workspace_tree);
+        self.check_activity();
         self.apply_search_filter();
     }
 
@@ -193,6 +200,23 @@ impl App {
         self.rebuild_display_list();
     }
 
+    pub fn toggle_pin(&mut self) {
+        let name = match self.selected_display_item() {
+            Some(ListItem::TreeRepo { name, .. }) => name.clone(),
+            Some(ListItem::SessionItem(session)) => session.name.clone(),
+            _ => return,
+        };
+        if self.pins.contains(&name) {
+            self.pins.remove(&name);
+            self.set_status(format!("Unpinned '{name}'"));
+        } else {
+            self.pins.insert(name.clone());
+            self.set_status(format!("Pinned '{name}'"));
+        }
+        save_pins(&self.pins);
+        self.rebuild_display_list();
+    }
+
     pub fn start_search(&mut self) {
         self.mode = Mode::Searching;
         self.search_input.clear();
@@ -233,6 +257,10 @@ impl App {
         let mut merged_sessions: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
+        // Build workspace items
+        let mut ws_items: Vec<ListItem> = Vec::new();
+        let mut ws_selectable: Vec<usize> = Vec::new();
+
         if let Some(ref tree) = self.workspace_tree {
             let tree = tree.clone();
             if self.search_input.is_empty() {
@@ -241,8 +269,9 @@ impl App {
                     0,
                     &session_map,
                     &mut merged_sessions,
-                    &mut self.display_items,
-                    &mut self.selectable_indices,
+                    &mut ws_items,
+                    &mut ws_selectable,
+                    &mut Vec::new(),
                 );
             } else {
                 let query = self.search_input.clone();
@@ -252,14 +281,15 @@ impl App {
                     &query,
                     &session_map,
                     &mut merged_sessions,
-                    &mut self.display_items,
-                    &mut self.selectable_indices,
+                    &mut ws_items,
+                    &mut ws_selectable,
+                    &mut Vec::new(),
                 );
             }
         }
 
         // Orphan sessions: not merged into any tree repo, and not a *-2 pane session
-        let orphan_sessions: Vec<&Session> = sessions_clone
+        let mut orphan_sessions: Vec<&Session> = sessions_clone
             .iter()
             .filter(|s| {
                 !merged_sessions.contains(&s.name)
@@ -267,15 +297,146 @@ impl App {
             })
             .collect();
 
+        // Sort by fuzzy match score when searching
+        if !self.search_input.is_empty() {
+            orphan_sessions.sort_by(|a, b| {
+                let score_a = fuzzy_match(&a.name, &self.search_input)
+                    .map(|(_, s)| s)
+                    .unwrap_or(i32::MIN);
+                let score_b = fuzzy_match(&b.name, &self.search_input)
+                    .map(|(_, s)| s)
+                    .unwrap_or(i32::MIN);
+                score_b.cmp(&score_a)
+            });
+        }
+
+        // Build orphan items
+        let mut orphan_items: Vec<ListItem> = Vec::new();
+        let mut orphan_selectable: Vec<usize> = Vec::new();
+
         if !orphan_sessions.is_empty() {
-            self.display_items
-                .push(ListItem::SectionHeader("Sessions".to_string()));
-            for session in orphan_sessions {
-                let idx = self.display_items.len();
-                self.display_items
-                    .push(ListItem::SessionItem(session.clone()));
-                self.selectable_indices.push(idx);
+            orphan_items.push(ListItem::SectionHeader("Sessions".to_string()));
+            for session in &orphan_sessions {
+                let idx = orphan_items.len();
+                orphan_items.push(ListItem::SessionItem((*session).clone()));
+                orphan_selectable.push(idx);
             }
+        }
+
+        // Extract pinned items from workspace and orphan groups
+        let pins = &self.pins;
+        let mut pinned_items: Vec<ListItem> = Vec::new();
+
+        // Extract pinned TreeRepo items from ws_items (flatten prefix for pinned section)
+        let mut pinned_ws_indices: HashSet<usize> = HashSet::new();
+        for (i, item) in ws_items.iter().enumerate() {
+            if let ListItem::TreeRepo { name, .. } = item {
+                if pins.contains(name.as_str()) {
+                    pinned_ws_indices.insert(i);
+                    if let ListItem::TreeRepo { name, path, session, .. } = item {
+                        pinned_items.push(ListItem::TreeRepo {
+                            name: name.clone(),
+                            path: path.clone(),
+                            session: session.clone(),
+                            prefix: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Extract pinned SessionItem items from orphan_items
+        let mut pinned_orphan_indices: HashSet<usize> = HashSet::new();
+        for (i, item) in orphan_items.iter().enumerate() {
+            if let ListItem::SessionItem(session) = item {
+                if pins.contains(session.name.as_str()) {
+                    pinned_orphan_indices.insert(i);
+                    pinned_items.push(item.clone());
+                }
+            }
+        }
+
+        // Remove pinned items from their original groups
+        if !pinned_ws_indices.is_empty() {
+            let old_ws = std::mem::take(&mut ws_items);
+            let old_sel = std::mem::take(&mut ws_selectable);
+            let sel_set: HashSet<usize> = old_sel.into_iter().collect();
+            for (i, item) in old_ws.into_iter().enumerate() {
+                if pinned_ws_indices.contains(&i) {
+                    continue;
+                }
+                let new_idx = ws_items.len();
+                if sel_set.contains(&i) {
+                    ws_selectable.push(new_idx);
+                }
+                ws_items.push(item);
+            }
+        }
+        if !pinned_orphan_indices.is_empty() {
+            let old_orphan = std::mem::take(&mut orphan_items);
+            let old_sel = std::mem::take(&mut orphan_selectable);
+            let sel_set: HashSet<usize> = old_sel.into_iter().collect();
+            for (i, item) in old_orphan.into_iter().enumerate() {
+                if pinned_orphan_indices.contains(&i) {
+                    continue;
+                }
+                let new_idx = orphan_items.len();
+                if sel_set.contains(&i) {
+                    orphan_selectable.push(new_idx);
+                }
+                orphan_items.push(item);
+            }
+        }
+
+        // Prune orphan section if all items were pinned (only header remains)
+        if orphan_selectable.is_empty() {
+            orphan_items.clear();
+        }
+
+        // Append pinned section first
+        if !pinned_items.is_empty() {
+            self.display_items.push(ListItem::SectionHeader("Pinned".to_string()));
+            for item in pinned_items {
+                let idx = self.display_items.len();
+                self.selectable_indices.push(idx);
+                self.display_items.push(item);
+            }
+        }
+
+        // When searching, hoist the group with the best match score first
+        let orphans_first = if !self.search_input.is_empty() {
+            let best_ws_score = ws_items.iter().filter_map(|item| {
+                if let ListItem::TreeRepo { name, .. } = item {
+                    fuzzy_match(name, &self.search_input).map(|(_, s)| s)
+                } else {
+                    None
+                }
+            }).max().unwrap_or(i32::MIN);
+
+            let best_orphan_score = orphan_sessions.iter().filter_map(|s| {
+                fuzzy_match(&s.name, &self.search_input).map(|(_, sc)| sc)
+            }).max().unwrap_or(i32::MIN);
+
+            best_orphan_score > best_ws_score
+        } else {
+            false
+        };
+
+        // Helper: append a group's items, adjusting selectable indices to the current offset
+        let append_group = |items: Vec<ListItem>, sel: Vec<usize>, dest: &mut Vec<ListItem>, dest_sel: &mut Vec<usize>| {
+            let offset = dest.len();
+            for idx in sel {
+                dest_sel.push(offset + idx);
+            }
+            dest.extend(items);
+        };
+
+        if orphans_first {
+            append_group(orphan_items, orphan_selectable, &mut self.display_items, &mut self.selectable_indices);
+            append_group(ws_items, ws_selectable, &mut self.display_items, &mut self.selectable_indices);
+        } else {
+            append_group(ws_items, ws_selectable, &mut self.display_items, &mut self.selectable_indices);
+            append_group(orphan_items, orphan_selectable, &mut self.display_items, &mut self.selectable_indices);
         }
 
         // Apply "opened only" filter
@@ -291,11 +452,8 @@ impl App {
                             filtered_items.push(item.clone());
                         }
                     }
-                    ListItem::SessionItem(session) => {
-                        if history.contains_key(session.name.as_str()) {
-                            filtered_indices.push(filtered_items.len());
-                            filtered_items.push(item.clone());
-                        }
+                    ListItem::SessionItem(_session) => {
+                        // Don't show non-workspace sessions in opened filter
                     }
                     ListItem::TreeDir { .. } | ListItem::SectionHeader(_) => {
                         // Keep dirs/headers only if selectable items follow;
@@ -508,6 +666,18 @@ impl App {
     }
 
     pub fn detach_pty(&mut self) {
+        // Save snapshot before detaching (while vt100 screen is still accessible)
+        if let Some(ref pty) = self.pty_session {
+            if !self.attached_name.is_empty() {
+                save_snapshot(&self.attached_name, pty.screen());
+            }
+        }
+        if let Some(ref pty) = self.pty_right {
+            if !self.attached_right_name.is_empty() {
+                save_snapshot(&self.attached_right_name, pty.screen());
+            }
+        }
+
         // Send Ctrl+A, d to cleanly detach screen sessions
         if let Some(ref pty) = self.pty_session {
             pty.write_all(b"\x01d");
@@ -719,6 +889,7 @@ impl App {
             .unwrap_or_default()
             .as_secs();
         self.history.insert(name.to_string(), ts);
+        self.activity.remove(name);
         save_history(&self.history);
     }
 
@@ -731,6 +902,113 @@ impl App {
             .as_secs();
         Some(format_relative(now, ts))
     }
+
+    pub fn has_activity(&self, name: &str) -> bool {
+        self.activity.get(name).copied().unwrap_or(false)
+    }
+
+    fn check_activity(&mut self) {
+        let snap_dir = snapshot_dir();
+        if !snap_dir.exists() {
+            return;
+        }
+
+        // Collect detached sessions that we have history for (i.e. previously visited)
+        let to_check: Vec<(String, String)> = self
+            .all_sessions
+            .iter()
+            .filter(|s| {
+                matches!(s.state, screen::SessionState::Detached)
+                    && self.history.contains_key(&s.name)
+                    && snap_dir.join(&s.name).exists()
+            })
+            .map(|s| (s.name.clone(), s.pid_name.clone()))
+            .collect();
+
+        for (name, pid_name) in to_check {
+            let snapshot_path = snap_dir.join(&name);
+            let old_text = match std::fs::read_to_string(&snapshot_path) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+
+            let tmp = snap_dir.join(format!(".{name}.tmp"));
+            if screen::session_hardcopy(&pid_name, &tmp).is_err() {
+                continue;
+            }
+            let new_text = match std::fs::read_to_string(&tmp) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let _ = std::fs::remove_file(&tmp);
+
+            let changed = normalize_screen_text(&old_text) != normalize_screen_text(&new_text);
+            self.activity.insert(name, changed);
+        }
+    }
+}
+
+fn snapshot_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("scrn")
+        .join("snapshots")
+}
+
+fn save_snapshot(name: &str, screen: &vt100::Screen) {
+    let dir = snapshot_dir();
+    let _ = std::fs::create_dir_all(&dir);
+
+    let (rows, cols) = screen.size();
+    let mut text = String::new();
+    for row in 0..rows {
+        let mut line = String::new();
+        for col in 0..cols {
+            if let Some(cell) = screen.cell(row, col) {
+                let c = cell.contents();
+                if c.is_empty() {
+                    line.push(' ');
+                } else {
+                    line.push_str(&c);
+                }
+            }
+        }
+        text.push_str(line.trim_end());
+        text.push('\n');
+    }
+    let _ = std::fs::write(dir.join(name), text);
+}
+
+fn normalize_screen_text(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
+    let trimmed = lines
+        .iter()
+        .rev()
+        .skip_while(|l| l.is_empty())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .copied()
+        .collect::<Vec<_>>();
+    trimmed.join("\n")
+}
+
+fn build_tree_prefix(guide_lines: &[bool], is_last: bool) -> String {
+    let mut prefix = String::new();
+    for &has_more in guide_lines {
+        if has_more {
+            prefix.push_str("\u{2502}  "); // │  (3 chars)
+        } else {
+            prefix.push_str("   "); // 3 spaces
+        }
+    }
+    if is_last {
+        prefix.push_str("\u{2514}\u{2500} "); // └─ (3 chars)
+    } else {
+        prefix.push_str("\u{251c}\u{2500} "); // ├─ (3 chars)
+    }
+    prefix
 }
 
 fn flatten_tree(
@@ -740,15 +1018,20 @@ fn flatten_tree(
     merged: &mut std::collections::HashSet<String>,
     display_items: &mut Vec<ListItem>,
     selectable_indices: &mut Vec<usize>,
+    guide_lines: &mut Vec<bool>,
 ) {
-    if !node.is_repo {
+    if !node.is_repo && depth == 0 {
         display_items.push(ListItem::TreeDir {
             name: node.name.clone(),
-            depth,
+            prefix: String::new(),
         });
     }
 
-    for child in &node.children {
+    let child_count = node.children.len();
+    for (i, child) in node.children.iter().enumerate() {
+        let is_last = i == child_count - 1;
+        let prefix = build_tree_prefix(guide_lines, is_last);
+
         if child.is_repo {
             let session = session_map.get(child.name.as_str()).cloned().cloned();
             if let Some(ref s) = session {
@@ -763,12 +1046,18 @@ fn flatten_tree(
             display_items.push(ListItem::TreeRepo {
                 name: child.name.clone(),
                 path: child.path.clone(),
-                depth: depth + 1,
                 session,
+                prefix,
             });
             selectable_indices.push(idx);
         } else {
-            flatten_tree(child, depth + 1, session_map, merged, display_items, selectable_indices);
+            display_items.push(ListItem::TreeDir {
+                name: child.name.clone(),
+                prefix,
+            });
+            guide_lines.push(!is_last);
+            flatten_tree(child, depth + 1, session_map, merged, display_items, selectable_indices, guide_lines);
+            guide_lines.pop();
         }
     }
 }
@@ -781,22 +1070,39 @@ fn flatten_filtered(
     merged: &mut std::collections::HashSet<String>,
     display_items: &mut Vec<ListItem>,
     selectable_indices: &mut Vec<usize>,
+    guide_lines: &mut Vec<bool>,
 ) {
     if !node.is_repo {
         if !tree_has_match(node, query) {
             return;
         }
-        display_items.push(ListItem::TreeDir {
-            name: node.name.clone(),
-            depth,
-        });
+        if depth == 0 {
+            display_items.push(ListItem::TreeDir {
+                name: node.name.clone(),
+                prefix: String::new(),
+            });
+        }
     }
 
-    for child in &node.children {
-        if child.is_repo {
-            if fuzzy_match(&child.name, query).is_none() {
-                continue;
+    // Pre-filter visible children
+    let visible_children: Vec<&TreeNode> = node
+        .children
+        .iter()
+        .filter(|child| {
+            if child.is_repo {
+                fuzzy_match(&child.name, query).is_some()
+            } else {
+                tree_has_match(child, query)
             }
+        })
+        .collect();
+
+    let visible_count = visible_children.len();
+    for (i, child) in visible_children.iter().enumerate() {
+        let is_last = i == visible_count - 1;
+        let prefix = build_tree_prefix(guide_lines, is_last);
+
+        if child.is_repo {
             let session = session_map.get(child.name.as_str()).cloned().cloned();
             if let Some(ref s) = session {
                 merged.insert(s.name.clone());
@@ -810,12 +1116,18 @@ fn flatten_filtered(
             display_items.push(ListItem::TreeRepo {
                 name: child.name.clone(),
                 path: child.path.clone(),
-                depth: depth + 1,
                 session,
+                prefix,
             });
             selectable_indices.push(idx);
         } else {
-            flatten_filtered(child, depth + 1, query, session_map, merged, display_items, selectable_indices);
+            display_items.push(ListItem::TreeDir {
+                name: child.name.clone(),
+                prefix,
+            });
+            guide_lines.push(!is_last);
+            flatten_filtered(child, depth + 1, query, session_map, merged, display_items, selectable_indices, guide_lines);
+            guide_lines.pop();
         }
     }
 }
@@ -832,6 +1144,35 @@ fn tree_has_match(node: &TreeNode, query: &str) -> bool {
         }
     }
     false
+}
+
+fn pins_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("scrn")
+        .join("pins")
+}
+
+fn load_pins() -> HashSet<String> {
+    let path = pins_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashSet::new(),
+    };
+    contents
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
+}
+
+fn save_pins(pins: &HashSet<String>) {
+    let path = pins_path();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let mut lines: Vec<&str> = pins.iter().map(|s| s.as_str()).collect();
+    lines.sort();
+    let _ = std::fs::write(&path, lines.join("\n") + "\n");
 }
 
 fn history_path() -> PathBuf {
@@ -951,10 +1292,34 @@ fn format_relative(now: u64, ts: u64) -> String {
     }
 }
 
-pub fn fuzzy_match(haystack: &str, needle: &str) -> Option<Vec<usize>> {
+pub fn fuzzy_match(haystack: &str, needle: &str) -> Option<(Vec<usize>, i32)> {
     let haystack_lower: Vec<char> = haystack.chars().flat_map(|c| c.to_lowercase()).collect();
     let needle_lower: Vec<char> = needle.chars().flat_map(|c| c.to_lowercase()).collect();
 
+    if needle_lower.is_empty() {
+        return Some((Vec::new(), 0));
+    }
+
+    // Try exact substring match first
+    if let Some(start) = find_substring_pos(&haystack_lower, &needle_lower) {
+        let positions: Vec<usize> = (start..start + needle_lower.len()).collect();
+        let mut score: i32 = 10000;
+        if start == 0 {
+            score += 5000; // prefix bonus
+        }
+        if start == 0
+            || haystack_lower[start - 1] == '-'
+            || haystack_lower[start - 1] == '_'
+            || haystack_lower[start - 1] == '/'
+            || haystack_lower[start - 1] == '.'
+            || haystack_lower[start - 1] == ' '
+        {
+            score += 3000; // word boundary bonus
+        }
+        return Some((positions, score));
+    }
+
+    // Fall back to greedy subsequence match
     let mut positions = Vec::with_capacity(needle_lower.len());
     let mut hay_idx = 0;
     for nc in &needle_lower {
@@ -972,5 +1337,41 @@ pub fn fuzzy_match(haystack: &str, needle: &str) -> Option<Vec<usize>> {
             return None;
         }
     }
-    Some(positions)
+
+    // Score: consecutive bonus + word boundary bonus - spread penalty
+    let mut score: i32 = 0;
+    for i in 0..positions.len() {
+        if i > 0 && positions[i] == positions[i - 1] + 1 {
+            score += 50; // consecutive
+        }
+        let pos = positions[i];
+        if pos == 0
+            || haystack_lower[pos - 1] == '-'
+            || haystack_lower[pos - 1] == '_'
+            || haystack_lower[pos - 1] == '/'
+            || haystack_lower[pos - 1] == '.'
+            || haystack_lower[pos - 1] == ' '
+        {
+            score += 20; // word boundary
+        }
+    }
+    let spread = positions.last().unwrap_or(&0) - positions.first().unwrap_or(&0);
+    score -= spread as i32;
+
+    Some((positions, score))
+}
+
+fn find_substring_pos(haystack: &[char], needle: &[char]) -> Option<usize> {
+    if needle.len() > haystack.len() {
+        return None;
+    }
+    'outer: for start in 0..=haystack.len() - needle.len() {
+        for (i, nc) in needle.iter().enumerate() {
+            if haystack[start + i] != *nc {
+                continue 'outer;
+            }
+        }
+        return Some(start);
+    }
+    None
 }

@@ -48,6 +48,7 @@ const SECTION_FG: Color = Color::Rgb(140, 120, 180);
 const REPO_FG: Color = Color::Rgb(180, 180, 200);
 const SEPARATOR_FG: Color = Color::Rgb(60, 60, 80);
 const ACTIVE_PANE_BORDER: Color = Color::Rgb(120, 160, 255);
+const TREE_GUIDE: Color = Color::Rgb(55, 55, 75);
 
 fn split_at_char_pos(s: &str, pos: usize) -> (&str, &str) {
     let byte_pos = s
@@ -246,17 +247,25 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                 ])
                 .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
             }
-            ListItem::TreeDir { name, depth } => {
-                let indent = "  ".repeat(*depth);
-                let display_name = format!("{indent}{name}/");
+            ListItem::TreeDir { name, prefix, .. } => {
+                let mut spans = vec![
+                    Span::styled("  ", Style::default().fg(SECTION_FG).bg(BASE_BG)),
+                ];
+                if !prefix.is_empty() {
+                    spans.push(Span::styled(
+                        prefix.clone(),
+                        Style::default().fg(TREE_GUIDE).bg(BASE_BG),
+                    ));
+                }
+                spans.push(Span::styled(
+                    format!("{name}/"),
+                    Style::default()
+                        .fg(SECTION_FG)
+                        .bg(BASE_BG)
+                        .add_modifier(Modifier::DIM),
+                ));
                 Row::new(vec![
-                    Cell::from(Line::from(Span::styled(
-                        format!("  {display_name}"),
-                        Style::default()
-                            .fg(SECTION_FG)
-                            .bg(BASE_BG)
-                            .add_modifier(Modifier::DIM),
-                    ))),
+                    Cell::from(Line::from(spans)),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                 ])
@@ -264,29 +273,30 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
             }
             ListItem::TreeRepo {
                 name,
-                depth,
                 session,
+                prefix,
                 ..
             } => {
                 let bg = if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
 
-                let indent = "  ".repeat(*depth);
-                let prefix = format!("  {indent}");
-                let avail = name_chars.saturating_sub(prefix.chars().count());
+                let active = app.has_activity(name);
+                let margin = "  ";
+                let activity_width = if active { 2 } else { 0 }; // "● " = 2 chars
+                let avail = name_chars.saturating_sub(margin.len() + prefix.chars().count() + activity_width);
                 let name_text = truncate(name, avail);
                 let has_session = session.is_some();
-                let name_fg = if has_session { GREEN } else { REPO_FG };
+                let name_fg = if active { YELLOW } else if has_session { GREEN } else { REPO_FG };
 
                 let name_cell = if !app.search_input.is_empty() {
-                    if let Some(positions) = fuzzy_match(name, &app.search_input) {
+                    if let Some((positions, _)) = fuzzy_match(name, &app.search_input) {
                         let max_pos = name_text.chars().count();
                         let highlight_set: std::collections::HashSet<usize> =
                             positions.into_iter().filter(|&p| p < max_pos).collect();
-                        let mut spans = vec![Span::styled(
-                            prefix.clone(),
-                            Style::default().fg(name_fg).bg(bg),
-                        )];
+                        let mut spans = vec![
+                            Span::styled(margin.to_string(), Style::default().fg(name_fg).bg(bg)),
+                            Span::styled(prefix.clone(), Style::default().fg(TREE_GUIDE).bg(bg)),
+                        ];
                         let normal_style = Style::default().fg(name_fg).bg(bg);
                         let match_style = Style::default()
                             .fg(MATCH_FG)
@@ -309,18 +319,31 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                                 if current_is_match { match_style } else { normal_style };
                             spans.push(Span::styled(current, style));
                         }
+                        if active {
+                            spans.push(Span::styled(" \u{25cf}", Style::default().fg(YELLOW).bg(bg)));
+                        }
                         Cell::from(Line::from(spans))
                     } else {
-                        Cell::from(Line::from(vec![
-                            Span::styled(prefix, Style::default().fg(name_fg).bg(bg)),
-                            Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
-                        ]))
+                        let mut spans = vec![
+                            Span::styled(margin.to_string(), Style::default().fg(name_fg).bg(bg)),
+                            Span::styled(prefix.clone(), Style::default().fg(TREE_GUIDE).bg(bg)),
+                        ];
+                        spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
+                        if active {
+                            spans.push(Span::styled(" \u{25cf}", Style::default().fg(YELLOW).bg(bg)));
+                        }
+                        Cell::from(Line::from(spans))
                     }
                 } else {
-                    Cell::from(Line::from(vec![
-                        Span::styled(prefix, Style::default().fg(name_fg).bg(bg)),
-                        Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
-                    ]))
+                    let mut spans = vec![
+                        Span::styled(margin.to_string(), Style::default().fg(name_fg).bg(bg)),
+                        Span::styled(prefix.clone(), Style::default().fg(TREE_GUIDE).bg(bg)),
+                    ];
+                    spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
+                    if active {
+                        spans.push(Span::styled(" \u{25cf}", Style::default().fg(YELLOW).bg(bg)));
+                    }
+                    Cell::from(Line::from(spans))
                 };
 
                 let (state_text, state_color) = if let Some(ref s) = session {
@@ -360,16 +383,17 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
 
                 let bg = if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
-                let name_fg = if is_current { ACCENT } else { FG };
-
+                let active = app.has_activity(&session.name);
+                let name_fg = if is_current { ACCENT } else if active { YELLOW } else { GREEN };
                 let prefix = if is_current { "\u{25c6} " } else { "  " };
-                let avail = name_chars.saturating_sub(prefix.chars().count());
+                let activity_width = if active { 2 } else { 0 };
+                let avail = name_chars.saturating_sub(prefix.chars().count() + activity_width);
                 let name_text = truncate(&session.name, avail);
 
                 let prefix_fg = if is_current { ACCENT } else { FG };
 
                 let name_cell = if !app.search_input.is_empty() {
-                    if let Some(positions) = fuzzy_match(&session.name, &app.search_input) {
+                    if let Some((positions, _)) = fuzzy_match(&session.name, &app.search_input) {
                         let max_pos = name_text.chars().count();
                         let highlight_set: std::collections::HashSet<usize> =
                             positions.into_iter().filter(|&p| p < max_pos).collect();
@@ -399,24 +423,35 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                                 if current_is_match { match_style } else { normal_style };
                             spans.push(Span::styled(current, style));
                         }
+                        if active {
+                            spans.push(Span::styled(" \u{25cf}", Style::default().fg(YELLOW).bg(bg)));
+                        }
                         Cell::from(Line::from(spans))
                     } else {
-                        Cell::from(Line::from(vec![
+                        let mut spans = vec![
                             Span::styled(
                                 prefix.to_string(),
                                 Style::default().fg(prefix_fg).bg(bg),
                             ),
-                            Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
-                        ]))
+                        ];
+                        spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
+                        if active {
+                            spans.push(Span::styled(" \u{25cf}", Style::default().fg(YELLOW).bg(bg)));
+                        }
+                        Cell::from(Line::from(spans))
                     }
                 } else {
-                    Cell::from(Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(
                             prefix.to_string(),
                             Style::default().fg(prefix_fg).bg(bg),
                         ),
-                        Span::styled(name_text, Style::default().fg(name_fg).bg(bg)),
-                    ]))
+                    ];
+                    spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
+                    if active {
+                        spans.push(Span::styled(" \u{25cf}", Style::default().fg(YELLOW).bg(bg)));
+                    }
+                    Cell::from(Line::from(spans))
                 };
 
                 Row::new(vec![
@@ -491,7 +526,6 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
             .column_spacing(COL_SPACING)
             .row_highlight_style(
                 Style::default()
-                    .fg(FG_BRIGHT)
                     .bg(HIGHLIGHT_BG)
                     .add_modifier(Modifier::BOLD),
             )
@@ -571,7 +605,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             {
                 let filter_hint = if app.filter_opened { "  o:All" } else { "  o:Opened" };
                 format!(
-                    " q:Quit  j/k:Nav  g/G:Top/Bot  Enter:Attach  c:Create  x:Kill{home_hint}  /:Search{filter_hint}  ?:Legend "
+                    " q:Quit  j/k:Nav  g/G:Top/Bot  Enter:Attach  c:Create  x:Kill  p:Pin{home_hint}  /:Search{filter_hint}  ?:Legend "
                 )
             },
         ),
@@ -928,6 +962,7 @@ fn draw_legend(f: &mut Frame, app: &App) {
         ("c", "Create"),
         ("n", "Rename"),
         ("x", "Kill"),
+        ("p", "Pin/Unpin"),
         ("/", "Search"),
         ("r", "Refresh"),
         ("j/k", "Navigate"),
@@ -1378,10 +1413,6 @@ pub fn write_pty_cursor(
     inner_x: u16,
     inner_y: u16,
 ) -> std::io::Result<()> {
-    if screen.hide_cursor() {
-        // PTY app (e.g. lazygit during render) wants cursor hidden — respect it
-        return Ok(());
-    }
     let (cr, cc) = screen.cursor_position();
     let cursor_x = inner_x + cc + 1;
     let cursor_y = inner_y + cr + 1;

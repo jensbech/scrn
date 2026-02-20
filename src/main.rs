@@ -598,6 +598,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('X') => app.start_kill_all(),
                         KeyCode::Char('d') => app.go_home(),
                         KeyCode::Char('/') => app.start_search(),
+                        KeyCode::Char('p') => app.toggle_pin(),
                         KeyCode::Char('r') => app.refresh_sessions(),
                         KeyCode::Char('?') => app.show_legend = !app.show_legend,
                         _ => {}
