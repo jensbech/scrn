@@ -93,17 +93,35 @@ impl PtySession {
         any
     }
 
-    /// Send input bytes to the PTY.
+    /// Send input bytes to the PTY, handling partial writes and back-pressure.
     pub fn write_all(&self, data: &[u8]) {
         if data.is_empty() {
             return;
         }
-        unsafe {
-            libc::write(
-                self.master.as_raw_fd(),
-                data.as_ptr().cast(),
-                data.len(),
-            );
+        let fd = self.master.as_raw_fd();
+        let mut offset = 0;
+        while offset < data.len() {
+            let n = unsafe {
+                libc::write(fd, data[offset..].as_ptr().cast(), data[offset..].len())
+            };
+            if n > 0 {
+                offset += n as usize;
+            } else {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::WouldBlock {
+                    // PTY buffer full — wait for it to drain
+                    let mut pfd = libc::pollfd {
+                        fd,
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    };
+                    unsafe {
+                        libc::poll(&mut pfd, 1, 100);
+                    }
+                } else {
+                    break;
+                }
+            }
         }
     }
 

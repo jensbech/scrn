@@ -2,6 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+extern crate libc;
+
 #[derive(Clone, Debug)]
 pub enum SessionState {
     Attached,
@@ -157,17 +159,41 @@ pub fn list_sessions() -> Result<Vec<Session>, String> {
 }
 
 pub fn kill_session(pid_name: &str) -> Result<(), String> {
-    let output = Command::new("screen")
-        .args(["-X", "-S", pid_name, "quit"])
-        .output()
-        .map_err(|e| format!("Failed to kill session: {e}"))?;
+    let pid = pid_name
+        .split('.')
+        .next()
+        .and_then(|s| s.parse::<i32>().ok())
+        .ok_or_else(|| format!("Failed to parse PID from '{pid_name}'"))?;
 
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("Failed to kill session: {}", stderr.trim()))
+    // SIGTERM first for graceful shutdown
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
     }
+
+    // Wait up to 500ms for it to die
+    for _ in 0..50 {
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    // Still alive? SIGKILL
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // screen -wipe doesn't reliably clean up on screen 5 — remove the socket directly
+    let _ = Command::new("screen").arg("-wipe").output();
+    if let Ok(home) = std::env::var("HOME") {
+        let socket = PathBuf::from(&home).join(".screen").join(pid_name);
+        let _ = fs::remove_file(&socket);
+    }
+
+    Ok(())
 }
 
 pub fn rename_session(pid_name: &str, new_name: &str) -> Result<(), String> {

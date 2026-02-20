@@ -12,8 +12,8 @@ use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-    MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -134,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
 
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
@@ -718,6 +718,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => {}
                     },
                 },
+                Event::Paste(text) => {
+                    if app.mode == Mode::Attached {
+                        let active_pty = match app.active_pane {
+                            Pane::Left => app.pty_session.as_ref(),
+                            Pane::Right => app.pty_right.as_ref(),
+                        };
+                        if let Some(pty) = active_pty {
+                            if pty.screen().bracketed_paste() {
+                                pty.write_all(b"\x1b[200~");
+                                pty.write_all(text.as_bytes());
+                                pty.write_all(b"\x1b[201~");
+                            } else {
+                                pty.write_all(text.as_bytes());
+                            }
+                        }
+                    }
+                }
                 Event::Mouse(mouse) => {
                     if app.mode == Mode::Attached {
                         match mouse.kind {
@@ -809,6 +826,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;
