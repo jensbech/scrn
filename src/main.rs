@@ -711,14 +711,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             handled = true;
                         }
 
-                        // Tab in sidebar mode: switch focus to list
-                        if !handled && app.sidebar_mode && key.code == KeyCode::Tab {
-                            last_esc = None;
-                            app.sidebar_focus = SidebarFocus::List;
-                            ui_needs_draw = true;
-                            handled = true;
-                        }
-
                         // When scrolled back, intercept navigation keys
                         if !handled {
                             let active_offset = match app.active_pane {
