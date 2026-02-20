@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind,
+    Event, KeyCode, KeyEventKind, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -134,7 +135,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
 
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
@@ -324,7 +331,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let inner_x = 1u16;
                     let inner_y = 1u16;
                     let inner_w = cols.saturating_sub(2);
-                    let inner_h = rows.saturating_sub(3);
+                    let inner_h = rows.saturating_sub(2);
 
                     if pty_needs_render {
                         // Force full redraw when text selection is active
@@ -523,12 +530,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         pty_needs_render = true;
                                     }
                                     KeyCode::PageUp => {
-                                        let page = term_rows.saturating_sub(3) as usize;
+                                        let page = term_rows.saturating_sub(2) as usize;
                                         *active_offset += page;
                                         pty_needs_render = true;
                                     }
                                     KeyCode::PageDown => {
-                                        let page = term_rows.saturating_sub(3) as usize;
+                                        let page = term_rows.saturating_sub(2) as usize;
                                         *active_offset = active_offset.saturating_sub(page);
                                         pty_needs_render = true;
                                     }
@@ -826,6 +833,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        PopKeyboardEnhancementFlags,
         DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
@@ -863,7 +871,7 @@ fn hit_test_pane(app: &App, mx: u16, my: u16, cols: u16, rows: u16) -> Option<(P
         let inner_x = 1u16;
         let inner_y = 1u16;
         let inner_w = cols.saturating_sub(2);
-        let inner_h = rows.saturating_sub(3);
+        let inner_h = rows.saturating_sub(2);
         if my >= inner_y && my < inner_y + inner_h && mx >= inner_x && mx < inner_x + inner_w {
             return Some((Pane::Left, my - inner_y, mx - inner_x));
         }
@@ -887,7 +895,7 @@ fn clamp_to_pane(pane: Pane, app: &App, mx: u16, my: u16, cols: u16, rows: u16) 
         let inner_x = 1u16;
         let inner_y = 1u16;
         let inner_w = cols.saturating_sub(2);
-        let inner_h = rows.saturating_sub(3);
+        let inner_h = rows.saturating_sub(2);
         let row = my.max(inner_y).min(inner_y + inner_h - 1) - inner_y;
         let col = mx.max(inner_x).min(inner_x + inner_w - 1) - inner_x;
         (row, col)
@@ -904,7 +912,7 @@ fn pane_inner_size(pane: Pane, app: &App, cols: u16, rows: u16) -> (u16, u16) {
         };
         (w, inner_h)
     } else {
-        (cols.saturating_sub(2), rows.saturating_sub(3))
+        (cols.saturating_sub(2), rows.saturating_sub(2))
     }
 }
 

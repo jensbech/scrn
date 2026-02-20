@@ -35,11 +35,6 @@ const STATUS_ERR: Color = Color::Rgb(220, 140, 140);
 const KILL_BORDER: Color = Color::Rgb(200, 80, 80);
 const KILL_BG: Color = Color::Rgb(30, 15, 15);
 const KILL_TITLE: Color = Color::Rgb(220, 140, 140);
-const MODE_NORMAL_BG: Color = Color::Rgb(60, 60, 120);
-const MODE_SEARCH_BG: Color = Color::Rgb(180, 160, 40);
-const MODE_CREATE_BG: Color = Color::Rgb(60, 160, 80);
-const MODE_KILL_BG: Color = Color::Rgb(180, 60, 60);
-const MODE_DARK_FG: Color = Color::Rgb(10, 10, 15);
 const DIM_FG: Color = Color::Rgb(50, 50, 60);
 const DIM_BG: Color = Color::Rgb(10, 10, 15);
 const VERSION_FG: Color = Color::Rgb(80, 80, 100);
@@ -131,22 +126,15 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let show_search_bar = app.mode == Mode::Searching || !app.search_input.is_empty();
     let constraints = if show_search_bar {
-        vec![
-            Constraint::Min(3),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ]
-    } else {
         vec![Constraint::Min(3), Constraint::Length(1)]
+    } else {
+        vec![Constraint::Min(0)]
     };
     let chunks = Layout::vertical(constraints).split(f.area());
 
     draw_table(f, app, chunks[0]);
     if show_search_bar {
         draw_search_bar(f, app, chunks[1]);
-        draw_status_bar(f, app, chunks[2]);
-    } else {
-        draw_status_bar(f, app, chunks[1]);
     }
 
     match app.mode {
@@ -470,13 +458,36 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                 format!("v{} ", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(VERSION_FG).bg(BASE_BG),
             ),
-        ]));
+        ]))
+        .title(
+            Line::from(Span::styled(
+                " Legend (?) ",
+                Style::default().fg(HELP_FG).bg(BASE_BG),
+            ))
+            .right_aligned(),
+        );
 
+    // Bottom border: status message and/or filter indicator
+    let mut bottom_spans: Vec<Span> = Vec::new();
     if app.filter_opened {
-        block = block.title_bottom(Line::from(Span::styled(
+        bottom_spans.push(Span::styled(
             " Showing: opened only ",
             Style::default().fg(MATCH_FG).bg(BASE_BG),
-        )));
+        ));
+    }
+    if !app.status_msg.is_empty() {
+        let is_error = app.status_msg.starts_with("Error");
+        let fg = if is_error { STATUS_ERR } else { STATUS_OK };
+        if !bottom_spans.is_empty() {
+            bottom_spans.push(Span::styled(" ", Style::default().bg(BASE_BG)));
+        }
+        bottom_spans.push(Span::styled(
+            format!(" {} ", app.status_msg),
+            Style::default().fg(fg).bg(BASE_BG),
+        ));
+    }
+    if !bottom_spans.is_empty() {
+        block = block.title_bottom(Line::from(bottom_spans));
     }
 
     if app.selectable_indices.is_empty() {
@@ -565,95 +576,6 @@ fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-// ── Status bar ──────────────────────────────────────────────
-
-fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    let in_screen = app.current_session.is_some();
-    let home_hint = if in_screen { "  d:Home" } else { "" };
-
-    let (mode_text, help_text) = match app.mode {
-        Mode::Normal => (
-            Span::styled(
-                " NORMAL ",
-                Style::default()
-                    .bg(MODE_NORMAL_BG)
-                    .fg(FG_BRIGHT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            {
-                let filter_hint = if app.filter_opened { "  o:All" } else { "  o:Opened" };
-                format!(
-                    " q:Quit  j/k:Nav  g/G:Top/Bot  Enter:Attach  c:Create  x:Kill  p:Pin{home_hint}  /:Search{filter_hint}  ?:Legend "
-                )
-            },
-        ),
-        Mode::Searching => (
-            Span::styled(
-                " SEARCH ",
-                Style::default()
-                    .bg(MODE_SEARCH_BG)
-                    .fg(MODE_DARK_FG)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            " Type to filter  \u{2191}\u{2193}:Navigate  Enter:Keep filter  Esc:Clear ".to_string(),
-        ),
-        Mode::Creating | Mode::Renaming => {
-            let (label, hint) = if app.mode == Mode::Creating {
-                (" CREATE ", " Enter:Create  Esc:Cancel ")
-            } else {
-                (" RENAME ", " Enter:Rename  Esc:Cancel ")
-            };
-            (
-                Span::styled(
-                    label,
-                    Style::default()
-                        .bg(MODE_CREATE_BG)
-                        .fg(MODE_DARK_FG)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                hint.to_string(),
-            )
-        }
-        Mode::ConfirmKill | Mode::ConfirmKillAll1 | Mode::ConfirmKillAll2 | Mode::ConfirmQuit => (
-            Span::styled(
-                match app.mode {
-                    Mode::ConfirmKill => " KILL ",
-                    Mode::ConfirmKillAll1 | Mode::ConfirmKillAll2 => " KILL ALL ",
-                    _ => " QUIT ",
-                },
-                Style::default()
-                    .bg(MODE_KILL_BG)
-                    .fg(FG_BRIGHT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            " y/Enter:Confirm  n/Esc:Cancel ".to_string(),
-        ),
-        Mode::Attached => return, // handled by draw_attached
-    };
-
-    let status_spans: Vec<Span> = if app.status_msg.is_empty() {
-        vec![]
-    } else {
-        let is_error = app.status_msg.starts_with("Error");
-        let fg = if is_error { STATUS_ERR } else { STATUS_OK };
-        vec![
-            Span::styled(" ", Style::default().fg(FG).bg(BASE_BG)),
-            Span::styled(app.status_msg.clone(), Style::default().fg(fg).bg(BASE_BG)),
-        ]
-    };
-
-    let mut spans = vec![
-        mode_text,
-        Span::styled(help_text, Style::default().fg(HELP_FG).bg(BASE_BG)),
-    ];
-    spans.extend(status_spans);
-    let line = Line::from(spans);
-
-    f.render_widget(
-        Paragraph::new(line).style(Style::default().fg(FG).bg(BASE_BG)),
-        area,
-    );
-}
 
 // ── Create modal ────────────────────────────────────────────
 
@@ -940,11 +862,14 @@ fn draw_legend(f: &mut Frame, app: &App) {
         ("c", "Create"),
         ("n", "Rename"),
         ("x", "Kill"),
+        ("X", "Kill all"),
         ("p", "Pin/Unpin"),
         ("/", "Search"),
+        ("o", "Toggle filter"),
         ("r", "Refresh"),
         ("j/k", "Navigate"),
-        ("?", "Legend"),
+        ("g/G", "Top/Bottom"),
+        ("?", "Close legend"),
         ("q", "Quit"),
     ];
     if in_screen {
@@ -1001,9 +926,7 @@ fn draw_legend(f: &mut Frame, app: &App) {
 
 fn draw_attached(f: &mut Frame, app: &App) {
     let area = f.area();
-    let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(area);
-    let box_area = chunks[0];
-    let status_area = chunks[1];
+    let box_area = area;
 
     // Fill everything with base bg first
     let buf = f.buffer_mut();
@@ -1160,56 +1083,6 @@ fn draw_attached(f: &mut Frame, app: &App) {
         }
     }
 
-    // Status bar
-    if is_two_pane {
-        let pane_label = match app.active_pane {
-            Pane::Left => "Left",
-            Pane::Right => "Right",
-        };
-        let line = Line::from(vec![
-            Span::styled(
-                " ATTACHED ",
-                Style::default()
-                    .bg(MODE_CREATE_BG)
-                    .fg(MODE_DARK_FG)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" {} ({}) ", app.attached_name, pane_label),
-                Style::default().fg(FG_BRIGHT).bg(BASE_BG),
-            ),
-            Span::styled(
-                " Ctrl+S:Swap  Ctrl+E/N:Scroll  Ctrl+O:List  Esc Esc:Back ",
-                Style::default().fg(HELP_FG).bg(BASE_BG),
-            ),
-        ]);
-        f.render_widget(
-            Paragraph::new(line).style(Style::default().fg(FG).bg(BASE_BG)),
-            status_area,
-        );
-    } else {
-        let line = Line::from(vec![
-            Span::styled(
-                " ATTACHED ",
-                Style::default()
-                    .bg(MODE_CREATE_BG)
-                    .fg(MODE_DARK_FG)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" {} ", app.attached_name),
-                Style::default().fg(FG_BRIGHT).bg(BASE_BG),
-            ),
-            Span::styled(
-                " Ctrl+E/N:Scroll  Ctrl+O:List  Esc Esc:Back ",
-                Style::default().fg(HELP_FG).bg(BASE_BG),
-            ),
-        ]);
-        f.render_widget(
-            Paragraph::new(line).style(Style::default().fg(FG).bg(BASE_BG)),
-            status_area,
-        );
-    }
 }
 
 /// Compute two-pane layout geometry for render_pty_direct calls.
@@ -1218,7 +1091,7 @@ pub fn two_pane_geometry(cols: u16, rows: u16) -> (u16, u16, u16, u16, u16, u16)
     let inner_x = 1u16;
     let inner_y = 1u16;
     let inner_w = cols.saturating_sub(2);
-    let inner_h = rows.saturating_sub(3);
+    let inner_h = rows.saturating_sub(2);
 
     let left_w = (inner_w.saturating_sub(1)) * 60 / 100;
     let right_w = inner_w.saturating_sub(1).saturating_sub(left_w);

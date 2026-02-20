@@ -527,7 +527,7 @@ impl App {
                 return;
             }
         }
-        let pty_rows = term_rows.saturating_sub(3);
+        let pty_rows = term_rows.saturating_sub(2);
         let pty_cols = term_cols.saturating_sub(2);
         let rc = crate::screen::ensure_screenrc();
         match PtySession::spawn("screen", &["-c", &rc, "-d", "-r", pid_name], pty_rows, pty_cols) {
@@ -563,7 +563,7 @@ impl App {
             .find(|s| s.name == right_name)
             .map(|s| s.pid_name.clone());
 
-        let pty_rows = term_rows.saturating_sub(3);
+        let pty_rows = term_rows.saturating_sub(2);
         let total_inner_cols = term_cols.saturating_sub(2);
         // 60/40 split with 1-col separator
         let left_cols = (total_inner_cols.saturating_sub(1)) * 60 / 100;
@@ -638,7 +638,7 @@ impl App {
                     self.attach_session(&session.name, &session.pid_name, term_rows, term_cols);
                 } else {
                     // Create + attach in one step so the shell starts at the correct PTY size
-                    let pty_rows = term_rows.saturating_sub(3);
+                    let pty_rows = term_rows.saturating_sub(2);
                     let pty_cols = term_cols.saturating_sub(2);
                     let rc = crate::screen::ensure_screenrc();
                     match PtySession::spawn_in_dir(
@@ -717,7 +717,7 @@ impl App {
     }
 
     pub fn resize_pty(&mut self, term_rows: u16, term_cols: u16) {
-        let pty_rows = term_rows.saturating_sub(3);
+        let pty_rows = term_rows.saturating_sub(2);
 
         if self.pty_right.is_some() {
             // Two-pane mode: recalculate 60/40 split

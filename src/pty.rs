@@ -222,6 +222,11 @@ pub fn key_to_bytes(key: &KeyEvent, app_cursor: bool) -> Vec<u8> {
     // Arrow keys: application mode uses \x1bO prefix, normal uses \x1b[
     let arrow_prefix: &[u8] = if app_cursor { b"\x1bO" } else { b"\x1b[" };
 
+    // Shift+Enter → kitty protocol CSI u encoding so TUI apps can distinguish it
+    if key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::Enter {
+        return b"\x1b[13;2u".to_vec();
+    }
+
     match key.code {
         KeyCode::Char(c) => {
             let mut buf = [0u8; 4];
