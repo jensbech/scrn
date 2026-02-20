@@ -74,8 +74,6 @@ pub struct App {
     /// session name -> unix timestamp of last attach
     pub history: HashMap<String, u64>,
     pub filter_opened: bool,
-    /// session name -> has new output since last detach
-    pub activity: HashMap<String, bool>,
     /// pinned session/repo names — always shown at top
     pub pins: HashSet<String>,
 }
@@ -109,7 +107,6 @@ impl App {
             kill_session_info: None,
             history: load_history(),
             filter_opened: false,
-            activity: HashMap::new(),
             pins: load_pins(),
         }
     }
@@ -127,7 +124,6 @@ impl App {
             self.workspace_tree = Some(workspace::scan_tree(dir));
         }
         save_sessions(&self.all_sessions, &self.workspace_tree);
-        self.check_activity();
         self.apply_search_filter();
     }
 
@@ -452,8 +448,11 @@ impl App {
                             filtered_items.push(item.clone());
                         }
                     }
-                    ListItem::SessionItem(_session) => {
-                        // Don't show non-workspace sessions in opened filter
+                    ListItem::SessionItem(session) => {
+                        if history.contains_key(session.name.as_str()) {
+                            filtered_indices.push(filtered_items.len());
+                            filtered_items.push(item.clone());
+                        }
                     }
                     ListItem::TreeDir { .. } | ListItem::SectionHeader(_) => {
                         // Keep dirs/headers only if selectable items follow;
@@ -889,7 +888,6 @@ impl App {
             .unwrap_or_default()
             .as_secs();
         self.history.insert(name.to_string(), ts);
-        self.activity.remove(name);
         save_history(&self.history);
     }
 
@@ -903,49 +901,6 @@ impl App {
         Some(format_relative(now, ts))
     }
 
-    pub fn has_activity(&self, name: &str) -> bool {
-        self.activity.get(name).copied().unwrap_or(false)
-    }
-
-    fn check_activity(&mut self) {
-        let snap_dir = snapshot_dir();
-        if !snap_dir.exists() {
-            return;
-        }
-
-        // Collect detached sessions that we have history for (i.e. previously visited)
-        let to_check: Vec<(String, String)> = self
-            .all_sessions
-            .iter()
-            .filter(|s| {
-                matches!(s.state, screen::SessionState::Detached)
-                    && self.history.contains_key(&s.name)
-                    && snap_dir.join(&s.name).exists()
-            })
-            .map(|s| (s.name.clone(), s.pid_name.clone()))
-            .collect();
-
-        for (name, pid_name) in to_check {
-            let snapshot_path = snap_dir.join(&name);
-            let old_text = match std::fs::read_to_string(&snapshot_path) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-
-            let tmp = snap_dir.join(format!(".{name}.tmp"));
-            if screen::session_hardcopy(&pid_name, &tmp).is_err() {
-                continue;
-            }
-            let new_text = match std::fs::read_to_string(&tmp) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            let _ = std::fs::remove_file(&tmp);
-
-            let changed = normalize_screen_text(&old_text) != normalize_screen_text(&new_text);
-            self.activity.insert(name, changed);
-        }
-    }
 }
 
 fn snapshot_dir() -> PathBuf {
@@ -978,20 +933,6 @@ fn save_snapshot(name: &str, screen: &vt100::Screen) {
         text.push('\n');
     }
     let _ = std::fs::write(dir.join(name), text);
-}
-
-fn normalize_screen_text(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
-    let trimmed = lines
-        .iter()
-        .rev()
-        .skip_while(|l| l.is_empty())
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .copied()
-        .collect::<Vec<_>>();
-    trimmed.join("\n")
 }
 
 fn build_tree_prefix(guide_lines: &[bool], is_last: bool) -> String {

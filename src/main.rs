@@ -12,7 +12,8 @@ use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+    MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -165,6 +166,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scroll_offset_left: usize = 0;
     let mut scroll_offset_right: usize = 0;
 
+    // Mouse text selection: (pane, selection coordinates in pane-local space)
+    let mut selection: Option<(Pane, ui::PaneSelection)> = None;
+
     loop {
         // ── 1. Drain PTY output (fast — just memcpy + vt100 parse) ──
         if app.mode == Mode::Attached {
@@ -198,6 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_screen_right = None;
                 scroll_offset_left = 0;
                 scroll_offset_right = 0;
+                selection = None;
                 app.detach_pty();
             }
 
@@ -227,6 +232,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui::two_pane_geometry(cols, rows);
 
                     if pty_needs_render {
+                        // Force full redraw when text selection is active
+                        if selection.is_some() {
+                            prev_screen_left = None;
+                            prev_screen_right = None;
+                        }
                         // Render left pane
                         let mut sb_total_left = 0usize;
                         if let Some(ref mut pty) = app.pty_session {
@@ -242,6 +252,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if scroll_offset_left > 0 { None } else { prev_screen_left.as_ref() },
                                 left_x, inner_y, left_w, inner_h,
                             )?;
+                            if let Some((Pane::Left, sel)) = &selection {
+                                ui::render_selection(terminal.backend_mut(), pty.screen(), sel, left_x, inner_y, left_w, inner_h)?;
+                            }
                             if scroll_offset_left > 0 {
                                 ui::render_scrollbar(
                                     terminal.backend_mut(), scroll_offset_left, sb_total_left,
@@ -268,6 +281,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if scroll_offset_right > 0 { None } else { prev_screen_right.as_ref() },
                                 right_x, inner_y, right_w, inner_h,
                             )?;
+                            if let Some((Pane::Right, sel)) = &selection {
+                                ui::render_selection(terminal.backend_mut(), pty.screen(), sel, right_x, inner_y, right_w, inner_h)?;
+                            }
                             if scroll_offset_right > 0 {
                                 ui::render_scrollbar(
                                     terminal.backend_mut(), scroll_offset_right, sb_total_right,
@@ -311,6 +327,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let inner_h = rows.saturating_sub(3);
 
                     if pty_needs_render {
+                        // Force full redraw when text selection is active
+                        if selection.is_some() {
+                            prev_screen_left = None;
+                        }
                         let mut sb_total = 0usize;
                         if let Some(ref mut pty) = app.pty_session {
                             if scroll_offset_left > 0 {
@@ -325,6 +345,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if scroll_offset_left > 0 { None } else { prev_screen_left.as_ref() },
                                 inner_x, inner_y, inner_w, inner_h,
                             )?;
+                            if let Some((_, sel)) = &selection {
+                                ui::render_selection(terminal.backend_mut(), pty.screen(), sel, inner_x, inner_y, inner_w, inner_h)?;
+                            }
                             if scroll_offset_left > 0 {
                                 ui::render_scrollbar(
                                     terminal.backend_mut(), scroll_offset_left, sb_total,
@@ -421,6 +444,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match app.mode {
                     Mode::Attached => {
+                        // Clear text selection on any key press
+                        if selection.is_some() {
+                            selection = None;
+                            prev_screen_left = None;
+                            prev_screen_right = None;
+                            pty_needs_render = true;
+                        }
                         // Ctrl+E (scroll up) / Ctrl+N (scroll down) — always check first
                         let is_ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
                         let mut handled = false;
@@ -471,6 +501,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             scroll_offset_left = 0;
                             scroll_offset_right = 0;
                             app.detach_pty();
+                            selection = None;
                             handled = true;
                         }
 
@@ -527,6 +558,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     scroll_offset_left = 0;
                                     scroll_offset_right = 0;
                                     app.detach_pty();
+                                    selection = None;
                                 } else {
                                     // First Esc — forward to active pane PTY and start timer
                                     last_esc = Some(Instant::now());
@@ -688,7 +720,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 Event::Mouse(mouse) => {
                     if app.mode == Mode::Attached {
-                        // Mouse scroll not handled in attached mode — use Shift+Up/Down instead
+                        match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if let Some((pane, row, col)) = hit_test_pane(&app, mouse.column, mouse.row, term_cols, term_rows) {
+                                    selection = Some((pane, ui::PaneSelection {
+                                        start_row: row,
+                                        start_col: col,
+                                        end_row: row,
+                                        end_col: col,
+                                    }));
+                                    prev_screen_left = None;
+                                    prev_screen_right = None;
+                                    pty_needs_render = true;
+                                }
+                            }
+                            MouseEventKind::Drag(MouseButton::Left) => {
+                                if let Some((pane, ref mut sel)) = selection {
+                                    let (row, col) = clamp_to_pane(pane, &app, mouse.column, mouse.row, term_cols, term_rows);
+                                    sel.end_row = row;
+                                    sel.end_col = col;
+                                    prev_screen_left = None;
+                                    prev_screen_right = None;
+                                    pty_needs_render = true;
+                                }
+                            }
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                if let Some((pane, ref sel)) = selection {
+                                    if sel.is_non_empty() {
+                                        let screen = match pane {
+                                            Pane::Left => app.pty_session.as_ref().map(|p| p.screen()),
+                                            Pane::Right => app.pty_right.as_ref().map(|p| p.screen()),
+                                        };
+                                        if let Some(screen) = screen {
+                                            let (inner_w, inner_h) = pane_inner_size(pane, &app, term_cols, term_rows);
+                                            let text = ui::extract_selection_text(screen, sel, inner_w, inner_h);
+                                            if !text.is_empty() {
+                                                copy_to_clipboard(&text);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            MouseEventKind::ScrollUp => {
+                                let offset = match app.active_pane {
+                                    Pane::Left => &mut scroll_offset_left,
+                                    Pane::Right => &mut scroll_offset_right,
+                                };
+                                *offset += 3;
+                                pty_needs_render = true;
+                            }
+                            MouseEventKind::ScrollDown => {
+                                let offset = match app.active_pane {
+                                    Pane::Left => &mut scroll_offset_left,
+                                    Pane::Right => &mut scroll_offset_right,
+                                };
+                                *offset = offset.saturating_sub(3);
+                                pty_needs_render = true;
+                            }
+                            _ => {}
+                        }
                     } else {
                         match mouse.kind {
                             MouseEventKind::ScrollUp => app.move_up(),
@@ -736,4 +826,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Determine which pane a mouse click falls in, returning pane-local (row, col).
+fn hit_test_pane(app: &App, mx: u16, my: u16, cols: u16, rows: u16) -> Option<(Pane, u16, u16)> {
+    if app.pty_right.is_some() {
+        let (left_x, left_w, right_x, right_w, inner_y, inner_h) =
+            ui::two_pane_geometry(cols, rows);
+        if my >= inner_y && my < inner_y + inner_h {
+            if mx >= left_x && mx < left_x + left_w {
+                return Some((Pane::Left, my - inner_y, mx - left_x));
+            }
+            if mx >= right_x && mx < right_x + right_w {
+                return Some((Pane::Right, my - inner_y, mx - right_x));
+            }
+        }
+    } else {
+        let inner_x = 1u16;
+        let inner_y = 1u16;
+        let inner_w = cols.saturating_sub(2);
+        let inner_h = rows.saturating_sub(3);
+        if my >= inner_y && my < inner_y + inner_h && mx >= inner_x && mx < inner_x + inner_w {
+            return Some((Pane::Left, my - inner_y, mx - inner_x));
+        }
+    }
+    None
+}
+
+/// Clamp mouse coordinates to pane boundaries, returning pane-local (row, col).
+fn clamp_to_pane(pane: Pane, app: &App, mx: u16, my: u16, cols: u16, rows: u16) -> (u16, u16) {
+    if app.pty_right.is_some() {
+        let (left_x, left_w, right_x, right_w, inner_y, inner_h) =
+            ui::two_pane_geometry(cols, rows);
+        let (px, pw) = match pane {
+            Pane::Left => (left_x, left_w),
+            Pane::Right => (right_x, right_w),
+        };
+        let row = my.max(inner_y).min(inner_y + inner_h - 1) - inner_y;
+        let col = mx.max(px).min(px + pw - 1) - px;
+        (row, col)
+    } else {
+        let inner_x = 1u16;
+        let inner_y = 1u16;
+        let inner_w = cols.saturating_sub(2);
+        let inner_h = rows.saturating_sub(3);
+        let row = my.max(inner_y).min(inner_y + inner_h - 1) - inner_y;
+        let col = mx.max(inner_x).min(inner_x + inner_w - 1) - inner_x;
+        (row, col)
+    }
+}
+
+/// Get inner dimensions (width, height) for a specific pane.
+fn pane_inner_size(pane: Pane, app: &App, cols: u16, rows: u16) -> (u16, u16) {
+    if app.pty_right.is_some() {
+        let (_, left_w, _, right_w, _, inner_h) = ui::two_pane_geometry(cols, rows);
+        let w = match pane {
+            Pane::Left => left_w,
+            Pane::Right => right_w,
+        };
+        (w, inner_h)
+    } else {
+        (cols.saturating_sub(2), rows.saturating_sub(3))
+    }
+}
+
+/// Copy text to system clipboard using pbcopy.
+fn copy_to_clipboard(text: &str) {
+    use std::process::{Command, Stdio};
+    if let Ok(mut child) = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
 }

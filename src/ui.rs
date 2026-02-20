@@ -280,13 +280,11 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                 let bg = if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
 
-                let active = app.has_activity(name);
                 let margin = "  ";
-                let activity_width = if active { 2 } else { 0 }; // "● " = 2 chars
-                let avail = name_chars.saturating_sub(margin.len() + prefix.chars().count() + activity_width);
+                let avail = name_chars.saturating_sub(margin.len() + prefix.chars().count());
                 let name_text = truncate(name, avail);
                 let has_session = session.is_some();
-                let name_fg = if active { YELLOW } else if has_session { GREEN } else { REPO_FG };
+                let name_fg = if has_session { GREEN } else { REPO_FG };
 
                 let name_cell = if !app.search_input.is_empty() {
                     if let Some((positions, _)) = fuzzy_match(name, &app.search_input) {
@@ -319,9 +317,6 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                                 if current_is_match { match_style } else { normal_style };
                             spans.push(Span::styled(current, style));
                         }
-                        if active {
-                            spans.push(Span::styled(" \u{25cf}", Style::default().fg(YELLOW).bg(bg)));
-                        }
                         Cell::from(Line::from(spans))
                     } else {
                         let mut spans = vec![
@@ -329,9 +324,6 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                             Span::styled(prefix.clone(), Style::default().fg(TREE_GUIDE).bg(bg)),
                         ];
                         spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
-                        if active {
-                            spans.push(Span::styled(" \u{25cf}", Style::default().fg(YELLOW).bg(bg)));
-                        }
                         Cell::from(Line::from(spans))
                     }
                 } else {
@@ -340,9 +332,6 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                         Span::styled(prefix.clone(), Style::default().fg(TREE_GUIDE).bg(bg)),
                     ];
                     spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
-                    if active {
-                        spans.push(Span::styled(" \u{25cf}", Style::default().fg(YELLOW).bg(bg)));
-                    }
                     Cell::from(Line::from(spans))
                 };
 
@@ -383,11 +372,9 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
 
                 let bg = if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
-                let active = app.has_activity(&session.name);
-                let name_fg = if is_current { ACCENT } else if active { YELLOW } else { GREEN };
+                let name_fg = if is_current { ACCENT } else { GREEN };
                 let prefix = if is_current { "\u{25c6} " } else { "  " };
-                let activity_width = if active { 2 } else { 0 };
-                let avail = name_chars.saturating_sub(prefix.chars().count() + activity_width);
+                let avail = name_chars.saturating_sub(prefix.chars().count());
                 let name_text = truncate(&session.name, avail);
 
                 let prefix_fg = if is_current { ACCENT } else { FG };
@@ -423,9 +410,6 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                                 if current_is_match { match_style } else { normal_style };
                             spans.push(Span::styled(current, style));
                         }
-                        if active {
-                            spans.push(Span::styled(" \u{25cf}", Style::default().fg(YELLOW).bg(bg)));
-                        }
                         Cell::from(Line::from(spans))
                     } else {
                         let mut spans = vec![
@@ -435,9 +419,6 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                             ),
                         ];
                         spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
-                        if active {
-                            spans.push(Span::styled(" \u{25cf}", Style::default().fg(YELLOW).bg(bg)));
-                        }
                         Cell::from(Line::from(spans))
                     }
                 } else {
@@ -448,9 +429,6 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                         ),
                     ];
                     spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
-                    if active {
-                        spans.push(Span::styled(" \u{25cf}", Style::default().fg(YELLOW).bg(bg)));
-                    }
                     Cell::from(Line::from(spans))
                 };
 
@@ -1413,6 +1391,9 @@ pub fn write_pty_cursor(
     inner_x: u16,
     inner_y: u16,
 ) -> std::io::Result<()> {
+    if screen.hide_cursor() {
+        return Ok(());
+    }
     let (cr, cc) = screen.cursor_position();
     let cursor_x = inner_x + cc + 1;
     let cursor_y = inner_y + cr + 1;
@@ -1578,4 +1559,123 @@ pub fn render_scrollbar(
     }
 
     w.write_all(&buf)
+}
+
+// ── Text selection ──────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct PaneSelection {
+    pub start_row: u16,
+    pub start_col: u16,
+    pub end_row: u16,
+    pub end_col: u16,
+}
+
+impl PaneSelection {
+    /// Normalize so that start <= end (for iteration).
+    pub fn normalized(&self) -> (u16, u16, u16, u16) {
+        if self.start_row < self.end_row
+            || (self.start_row == self.end_row && self.start_col <= self.end_col)
+        {
+            (self.start_row, self.start_col, self.end_row, self.end_col)
+        } else {
+            (self.end_row, self.end_col, self.start_row, self.start_col)
+        }
+    }
+
+    pub fn is_non_empty(&self) -> bool {
+        self.start_row != self.end_row || self.start_col != self.end_col
+    }
+}
+
+/// Overlay selected cells with inverted colors.
+pub fn render_selection(
+    w: &mut impl Write,
+    screen: &vt100::Screen,
+    sel: &PaneSelection,
+    inner_x: u16,
+    inner_y: u16,
+    inner_w: u16,
+    inner_h: u16,
+) -> std::io::Result<()> {
+    let (sr, sc, er, ec) = sel.normalized();
+    let (scr_rows, scr_cols) = screen.size();
+    let max_row = er.min(inner_h.saturating_sub(1)).min(scr_rows.saturating_sub(1));
+    let mut buf = Vec::with_capacity(256);
+
+    for row in sr..=max_row {
+        let col_start = if row == sr { sc } else { 0 };
+        let col_end = if row == er { ec } else { inner_w.saturating_sub(1) };
+        let col_end = col_end.min(inner_w.saturating_sub(1)).min(scr_cols.saturating_sub(1));
+        if col_start > col_end {
+            continue;
+        }
+
+        push_cup(&mut buf, inner_y + row + 1, inner_x + col_start + 1);
+        let mut prev_style: Option<CellStyle> = None;
+
+        for col in col_start..=col_end {
+            if let Some(vt_cell) = screen.cell(row, col) {
+                if vt_cell.is_wide_continuation() {
+                    continue;
+                }
+                let mut style = CellStyle::from_vt(vt_cell);
+                style.inverse = !style.inverse;
+                if prev_style.as_ref() != Some(&style) {
+                    write_sgr(&mut buf, &style);
+                    prev_style = Some(style);
+                }
+                let contents = vt_cell.contents();
+                if contents.is_empty() {
+                    buf.push(b' ');
+                } else {
+                    buf.extend_from_slice(contents.as_bytes());
+                }
+            }
+        }
+    }
+
+    if !buf.is_empty() {
+        buf.extend_from_slice(b"\x1b[0m");
+        w.write_all(&buf)?;
+    }
+    Ok(())
+}
+
+/// Extract text content from the selected region of a PTY screen.
+pub fn extract_selection_text(
+    screen: &vt100::Screen,
+    sel: &PaneSelection,
+    inner_w: u16,
+    inner_h: u16,
+) -> String {
+    let (sr, sc, er, ec) = sel.normalized();
+    let (scr_rows, scr_cols) = screen.size();
+    let max_row = er.min(inner_h.saturating_sub(1)).min(scr_rows.saturating_sub(1));
+    let mut result = String::new();
+
+    for row in sr..=max_row {
+        let col_start = if row == sr { sc } else { 0 };
+        let col_end = if row == er { ec } else { inner_w.saturating_sub(1) };
+        let col_end = col_end.min(inner_w.saturating_sub(1)).min(scr_cols.saturating_sub(1));
+
+        let mut line = String::new();
+        for col in col_start..=col_end {
+            if let Some(cell) = screen.cell(row, col) {
+                let c = cell.contents();
+                if c.is_empty() {
+                    line.push(' ');
+                } else {
+                    line.push_str(&c);
+                }
+            }
+        }
+        if row < max_row {
+            result.push_str(line.trim_end());
+            result.push('\n');
+        } else {
+            result.push_str(line.trim_end());
+        }
+    }
+    result
 }
