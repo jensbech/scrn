@@ -4,101 +4,102 @@
       <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.5"/>
     </filter>
     <filter id="inset" x="-5%" y="-5%" width="112%" height="112%">
-      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="#000" flood-opacity="0.35"/>
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="#000" flood-opacity="0.3"/>
     </filter>
   </defs>
 
-  <!-- === Outer Window Frame === -->
+  <!-- === Outer Window === -->
   <g filter="url(#shadow)">
-    <rect x="3" y="3" width="294" height="194" rx="10" fill="#181926" stroke="#66BB6A" stroke-width="1.5" stroke-opacity="0.35"/>
+    <rect x="2" y="2" width="296" height="196" rx="10" fill="#181926" stroke="#66BB6A" stroke-width="1.5" stroke-opacity="0.35"/>
     <!-- Title bar -->
-    <rect x="3" y="3" width="294" height="28" rx="10" fill="#1e2030"/>
-    <rect x="3" y="21" width="294" height="10" fill="#1e2030"/>
-    <line x1="3" y1="31" x2="297" y2="31" stroke="#66BB6A" stroke-width="0.5" stroke-opacity="0.25"/>
+    <rect x="2" y="2" width="296" height="26" rx="10" fill="#1e2030"/>
+    <rect x="2" y="18" width="296" height="10" fill="#1e2030"/>
+    <line x1="2" y1="28" x2="298" y2="28" stroke="#66BB6A" stroke-width="0.5" stroke-opacity="0.2"/>
     <!-- Traffic lights -->
-    <circle cx="19" cy="17" r="4.5" fill="#ff5f57"/>
-    <circle cx="33" cy="17" r="4.5" fill="#febc2e"/>
-    <circle cx="47" cy="17" r="4.5" fill="#28c840"/>
+    <circle cx="18" cy="15" r="4.5" fill="#ff5f57"/>
+    <circle cx="32" cy="15" r="4.5" fill="#febc2e"/>
+    <circle cx="46" cy="15" r="4.5" fill="#28c840"/>
     <!-- Title -->
-    <text x="150" y="21" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,monospace" font-size="10" fill="#8087a2" font-weight="500">scrn</text>
+    <text x="150" y="19" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,monospace" font-size="10" fill="#8087a2" font-weight="500">scrn</text>
   </g>
 
-  <!-- Vertical divider between tree and terminal -->
-  <line x1="100" y1="31" x2="100" y2="197" stroke="#66BB6A" stroke-width="0.5" stroke-opacity="0.2"/>
+  <!-- Vertical divider -->
+  <line x1="100" y1="28" x2="100" y2="198" stroke="#66BB6A" stroke-width="0.5" stroke-opacity="0.2"/>
 
-  <!-- === Left Panel: Tree View === -->
+  <!-- === Left Sidebar: Tree View === -->
 
-  <!-- Selected item highlight -->
-  <rect x="4" y="52" width="95" height="14" rx="3" fill="#66BB6A" opacity="0.12"/>
+  <!-- Section header -->
+  <text x="10" y="43" font-family="ui-monospace,SFMono-Regular,monospace" font-size="5.5" fill="#8087a2" opacity="0.55" letter-spacing="1">WORKSPACE</text>
+
+  <!-- Expanded folder: projects -->
+  <polygon points="10,52 15,55.5 10,59" fill="#8087a2" opacity="0.55"/>
+  <rect x="19" y="53" width="44" height="3" rx="1.5" fill="#8087a2" opacity="0.5"/>
 
   <!-- Tree connector lines -->
-  <line x1="17" y1="48" x2="17" y2="110" stroke="#5b6078" stroke-width="0.6" stroke-opacity="0.25"/>
-  <line x1="17" y1="59" x2="22" y2="59" stroke="#5b6078" stroke-width="0.6" stroke-opacity="0.25"/>
-  <line x1="17" y1="75" x2="22" y2="75" stroke="#5b6078" stroke-width="0.6" stroke-opacity="0.25"/>
-  <line x1="17" y1="91" x2="22" y2="91" stroke="#5b6078" stroke-width="0.6" stroke-opacity="0.25"/>
-  <line x1="17" y1="107" x2="22" y2="107" stroke="#5b6078" stroke-width="0.6" stroke-opacity="0.25"/>
+  <line x1="15" y1="61" x2="15" y2="127" stroke="#5b6078" stroke-width="0.5" stroke-opacity="0.2"/>
+  <line x1="15" y1="71" x2="21" y2="71" stroke="#5b6078" stroke-width="0.5" stroke-opacity="0.2"/>
+  <line x1="15" y1="87" x2="21" y2="87" stroke="#5b6078" stroke-width="0.5" stroke-opacity="0.2"/>
+  <line x1="15" y1="103" x2="21" y2="103" stroke="#5b6078" stroke-width="0.5" stroke-opacity="0.2"/>
+  <line x1="15" y1="119" x2="21" y2="119" stroke="#5b6078" stroke-width="0.5" stroke-opacity="0.2"/>
 
-  <!-- Folder: projects (expanded) -->
-  <polygon points="11,40 17,44 11,48" fill="#8087a2" opacity="0.6"/>
-  <rect x="22" y="41" width="48" height="3" rx="1.5" fill="#8087a2" opacity="0.45"/>
+  <!-- Selected item highlight -->
+  <rect x="3" y="64" width="96" height="14" rx="2" fill="#66BB6A" opacity="0.12"/>
 
   <!-- Item: scrn (selected - green) -->
-  <rect x="24" y="57" width="4" height="4" rx="1" fill="#66BB6A" opacity="0.9"/>
-  <rect x="32" y="57" width="30" height="3" rx="1.5" fill="#66BB6A" opacity="0.7"/>
+  <rect x="23" y="69" width="4" height="4" rx="1" fill="#66BB6A" opacity="0.85"/>
+  <rect x="30" y="69" width="28" height="3.5" rx="1.5" fill="#66BB6A" opacity="0.65"/>
 
   <!-- Item: api -->
-  <rect x="24" y="73" width="4" height="4" rx="1" fill="#5b6078" opacity="0.45"/>
-  <rect x="32" y="73" width="20" height="3" rx="1.5" fill="#5b6078" opacity="0.35"/>
+  <rect x="23" y="85" width="4" height="4" rx="1" fill="#5b6078" opacity="0.4"/>
+  <rect x="30" y="85" width="20" height="3.5" rx="1.5" fill="#5b6078" opacity="0.35"/>
 
   <!-- Item: web -->
-  <rect x="24" y="89" width="4" height="4" rx="1" fill="#5b6078" opacity="0.45"/>
-  <rect x="32" y="89" width="26" height="3" rx="1.5" fill="#5b6078" opacity="0.35"/>
+  <rect x="23" y="101" width="4" height="4" rx="1" fill="#5b6078" opacity="0.4"/>
+  <rect x="30" y="101" width="26" height="3.5" rx="1.5" fill="#5b6078" opacity="0.35"/>
 
   <!-- Item: lib -->
-  <rect x="24" y="105" width="4" height="4" rx="1" fill="#5b6078" opacity="0.45"/>
-  <rect x="32" y="105" width="16" height="3" rx="1.5" fill="#5b6078" opacity="0.35"/>
+  <rect x="23" y="117" width="4" height="4" rx="1" fill="#5b6078" opacity="0.4"/>
+  <rect x="30" y="117" width="16" height="3.5" rx="1.5" fill="#5b6078" opacity="0.35"/>
 
-  <!-- Folder: tools (collapsed) -->
-  <polygon points="9,126 15,130 9,134" fill="#8087a2" opacity="0.4"/>
-  <rect x="19" y="128" width="36" height="3" rx="1.5" fill="#8087a2" opacity="0.35"/>
+  <!-- Collapsed folder: tools -->
+  <polygon points="8,139 13,142.5 8,146" fill="#8087a2" opacity="0.4"/>
+  <rect x="17" y="140" width="34" height="3" rx="1.5" fill="#8087a2" opacity="0.35"/>
 
-  <!-- Folder: config (collapsed) -->
-  <polygon points="9,144 15,148 9,152" fill="#8087a2" opacity="0.35"/>
-  <rect x="19" y="146" width="42" height="3" rx="1.5" fill="#8087a2" opacity="0.3"/>
+  <!-- Collapsed folder: config -->
+  <polygon points="8,155 13,158.5 8,162" fill="#8087a2" opacity="0.35"/>
+  <rect x="17" y="156" width="40" height="3" rx="1.5" fill="#8087a2" opacity="0.3"/>
 
   <!-- === Right Panel: Inner Terminal Window === -->
   <g filter="url(#inset)">
-    <rect x="105" y="36" width="187" height="156" rx="7" fill="#1e2030" stroke="#66BB6A" stroke-width="1" stroke-opacity="0.45"/>
+    <rect x="105" y="33" width="188" height="161" rx="7" fill="#1e2030" stroke="#66BB6A" stroke-width="1" stroke-opacity="0.45"/>
     <!-- Title bar -->
-    <rect x="105" y="36" width="187" height="22" rx="7" fill="#24273a"/>
-    <rect x="105" y="52" width="187" height="6" fill="#24273a"/>
-    <line x1="105" y1="58" x2="292" y2="58" stroke="#66BB6A" stroke-width="0.4" stroke-opacity="0.2"/>
+    <rect x="105" y="33" width="188" height="22" rx="7" fill="#24273a"/>
+    <rect x="105" y="49" width="188" height="6" fill="#24273a"/>
+    <line x1="105" y1="55" x2="293" y2="55" stroke="#66BB6A" stroke-width="0.4" stroke-opacity="0.2"/>
     <!-- Mini traffic lights -->
-    <circle cx="117" cy="47" r="3" fill="#ff5f57"/>
-    <circle cx="127" cy="47" r="3" fill="#febc2e"/>
-    <circle cx="137" cy="47" r="3" fill="#28c840"/>
+    <circle cx="117" cy="44" r="3" fill="#ff5f57"/>
+    <circle cx="127" cy="44" r="3" fill="#febc2e"/>
+    <circle cx="137" cy="44" r="3" fill="#28c840"/>
     <!-- Title -->
-    <text x="215" y="51" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,monospace" font-size="8" fill="#8087a2">scrn ~ session</text>
+    <text x="216" y="48" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,monospace" font-size="8" fill="#8087a2">session</text>
 
     <!-- Terminal content -->
-    <!-- Command 1 -->
-    <text x="113" y="75" font-family="ui-monospace,SFMono-Regular,monospace" font-size="7.5" fill="#66BB6A" opacity="0.85">$</text>
-    <rect x="122" y="70" width="54" height="2.5" rx="1" fill="#cad3f5" opacity="0.22"/>
-    <!-- Output lines -->
-    <rect x="113" y="83" width="82" height="2" rx="1" fill="#5b6078" opacity="0.28"/>
-    <rect x="113" y="91" width="68" height="2" rx="1" fill="#5b6078" opacity="0.22"/>
-    <rect x="113" y="99" width="74" height="2" rx="1" fill="#5b6078" opacity="0.18"/>
+    <!-- Command 1 + output -->
+    <text x="113" y="72" font-family="ui-monospace,SFMono-Regular,monospace" font-size="7.5" fill="#66BB6A" opacity="0.85">$</text>
+    <rect x="122" y="67" width="54" height="2.5" rx="1" fill="#cad3f5" opacity="0.22"/>
+    <rect x="113" y="79" width="82" height="2" rx="1" fill="#5b6078" opacity="0.25"/>
+    <rect x="113" y="87" width="68" height="2" rx="1" fill="#5b6078" opacity="0.2"/>
+    <rect x="113" y="95" width="74" height="2" rx="1" fill="#5b6078" opacity="0.16"/>
 
-    <!-- Command 2 -->
-    <text x="113" y="117" font-family="ui-monospace,SFMono-Regular,monospace" font-size="7.5" fill="#66BB6A" opacity="0.85">$</text>
-    <rect x="122" y="112" width="40" height="2.5" rx="1" fill="#cad3f5" opacity="0.22"/>
-    <!-- Output -->
-    <rect x="113" y="124" width="92" height="2" rx="1" fill="#5b6078" opacity="0.22"/>
-    <rect x="113" y="132" width="55" height="2" rx="1" fill="#5b6078" opacity="0.18"/>
+    <!-- Command 2 + output -->
+    <text x="113" y="113" font-family="ui-monospace,SFMono-Regular,monospace" font-size="7.5" fill="#66BB6A" opacity="0.85">$</text>
+    <rect x="122" y="108" width="40" height="2.5" rx="1" fill="#cad3f5" opacity="0.22"/>
+    <rect x="113" y="120" width="92" height="2" rx="1" fill="#5b6078" opacity="0.2"/>
+    <rect x="113" y="128" width="55" height="2" rx="1" fill="#5b6078" opacity="0.16"/>
 
-    <!-- Command 3: active prompt with blinking cursor -->
-    <text x="113" y="150" font-family="ui-monospace,SFMono-Regular,monospace" font-size="7.5" fill="#66BB6A" opacity="0.9">$</text>
-    <rect x="121" y="143" width="5" height="9" rx="1" fill="#66BB6A" opacity="0.85">
+    <!-- Active prompt with blinking cursor -->
+    <text x="113" y="148" font-family="ui-monospace,SFMono-Regular,monospace" font-size="7.5" fill="#66BB6A" opacity="0.9">$</text>
+    <rect x="121" y="141" width="5" height="9" rx="1" fill="#66BB6A" opacity="0.85">
       <animate attributeName="opacity" values="0.85;0.15;0.85" dur="1.2s" repeatCount="indefinite"/>
     </rect>
   </g>
