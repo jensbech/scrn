@@ -3,19 +3,24 @@ use std::path::PathBuf;
 
 pub struct Config {
     pub workspace: Option<PathBuf>,
+    pub sidebar: bool,
 }
 
 impl Config {
     pub fn load(cli_workspace: Option<&str>) -> Self {
-        // CLI arg takes precedence
+        // CLI arg takes precedence for workspace
         if let Some(ws) = cli_workspace {
             return Self {
                 workspace: Some(expand_tilde(ws)),
+                sidebar: false,
             };
         }
 
         // Try config file
-        let workspace = read_config_file().and_then(|contents| {
+        let mut workspace = None;
+        let mut sidebar = false;
+
+        if let Some(contents) = read_config_file() {
             for line in contents.lines() {
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') {
@@ -24,15 +29,20 @@ impl Config {
                 if let Some((key, value)) = line.split_once('=') {
                     let key = key.trim();
                     let value = value.trim().trim_matches('"');
-                    if key == "workspace" && !value.is_empty() {
-                        return Some(expand_tilde(value));
+                    match key {
+                        "workspace" if !value.is_empty() => {
+                            workspace = Some(expand_tilde(value));
+                        }
+                        "sidebar" => {
+                            sidebar = value == "true";
+                        }
+                        _ => {}
                     }
                 }
             }
-            None
-        });
+        }
 
-        Self { workspace }
+        Self { workspace, sidebar }
     }
 }
 

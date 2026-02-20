@@ -9,7 +9,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{fuzzy_match, App, ListItem, Mode, Pane};
+use crate::app::{fuzzy_match, App, ListItem, Mode, Pane, SidebarFocus};
 use crate::screen::SessionState;
 
 // ── Palette — ALL explicit Rgb, zero ANSI named colors ─────
@@ -105,6 +105,12 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
+    // Sidebar mode: always use sidebar layout (both list and attached views)
+    if app.sidebar_mode {
+        draw_sidebar_layout(f, app);
+        return;
+    }
+
     // Attached mode: render the embedded PTY terminal
     if app.mode == Mode::Attached {
         draw_attached(f, app);
@@ -920,6 +926,361 @@ fn draw_legend(f: &mut Frame, app: &App) {
         Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
         inner,
     );
+}
+
+// ── Sidebar layout ──────────────────────────────────────────
+
+fn draw_sidebar_layout(f: &mut Frame, app: &App) {
+    let area = f.area();
+
+    // Paint entire screen with base bg
+    let buf = f.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_fg(FG);
+                cell.set_bg(BASE_BG);
+                cell.set_symbol(" ");
+            }
+        }
+    }
+
+    let sw = app.sidebar_width(area.width);
+    let sidebar_area = Rect::new(area.x, area.y, sw, area.height);
+    let content_area = Rect::new(area.x + sw, area.y, area.width.saturating_sub(sw), area.height);
+
+    // Draw sidebar (session list)
+    draw_sidebar(f, app, sidebar_area);
+
+    // Draw content area
+    if app.mode == Mode::Attached {
+        draw_attached_in_area(f, app, content_area);
+    } else {
+        draw_sidebar_empty_content(f, app, content_area);
+    }
+
+    // Draw modals on top
+    match app.mode {
+        Mode::Creating => {
+            dim_background(f);
+            draw_create_modal(f, app);
+        }
+        Mode::Renaming => {
+            dim_background(f);
+            draw_rename_modal(f, app);
+        }
+        Mode::ConfirmKill => {
+            dim_background(f);
+            draw_kill_modal(f, app);
+        }
+        Mode::ConfirmKillAll1 => {
+            dim_background(f);
+            draw_kill_all_modal_1(f, app);
+        }
+        Mode::ConfirmKillAll2 => {
+            dim_background(f);
+            draw_kill_all_modal_2(f);
+        }
+        Mode::ConfirmQuit => {
+            dim_background(f);
+            draw_quit_modal(f);
+        }
+        _ => {}
+    }
+
+    if app.show_legend {
+        draw_legend(f, app);
+    }
+}
+
+fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
+    let sidebar_focused = app.sidebar_focus == SidebarFocus::List || app.mode != Mode::Attached;
+    let border_color = if sidebar_focused { ACTIVE_PANE_BORDER } else { BORDER_FG };
+
+    let show_search_bar = app.mode == Mode::Searching || !app.search_input.is_empty();
+
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color).bg(BASE_BG))
+        .style(Style::default().fg(FG).bg(BASE_BG))
+        .title(Line::from(vec![
+            Span::styled(
+                " scrn ",
+                Style::default()
+                    .fg(ACCENT)
+                    .bg(BASE_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+    // Bottom border: status message
+    let mut bottom_spans: Vec<Span> = Vec::new();
+    if !app.status_msg.is_empty() {
+        let is_error = app.status_msg.starts_with("Error");
+        let fg = if is_error { STATUS_ERR } else { STATUS_OK };
+        bottom_spans.push(Span::styled(
+            format!(" {} ", app.status_msg),
+            Style::default().fg(fg).bg(BASE_BG),
+        ));
+    }
+    if !bottom_spans.is_empty() {
+        block = block.title_bottom(Line::from(bottom_spans));
+    }
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Split inner area: list + optional search bar
+    let (list_area, search_area) = if show_search_bar {
+        let chunks = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ]).split(inner);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (inner, None)
+    };
+
+    // Draw compact session list
+    let selected_visual_row = app
+        .selectable_indices
+        .get(app.selected)
+        .copied();
+
+    let max_name_w = list_area.width as usize;
+
+    let rows: Vec<Row> = app
+        .display_items
+        .iter()
+        .map(|item| match item {
+            ListItem::SectionHeader(title) => {
+                Row::new(vec![Cell::from(Line::from(Span::styled(
+                    truncate(title, max_name_w),
+                    Style::default()
+                        .fg(SECTION_FG)
+                        .bg(BASE_BG)
+                        .add_modifier(Modifier::BOLD | Modifier::DIM),
+                )))])
+                .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
+            }
+            ListItem::TreeDir { name, prefix, .. } => {
+                let mut spans = Vec::new();
+                if !prefix.is_empty() {
+                    spans.push(Span::styled(
+                        prefix.clone(),
+                        Style::default().fg(TREE_GUIDE).bg(BASE_BG),
+                    ));
+                }
+                spans.push(Span::styled(
+                    format!("{name}/"),
+                    Style::default()
+                        .fg(SECTION_FG)
+                        .bg(BASE_BG)
+                        .add_modifier(Modifier::DIM),
+                ));
+                Row::new(vec![Cell::from(Line::from(spans))])
+                    .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
+            }
+            ListItem::TreeRepo { name, session, prefix, .. } => {
+                let has_session = session.is_some();
+                let name_fg = if has_session { GREEN } else { REPO_FG };
+                let avail = max_name_w.saturating_sub(prefix.chars().count());
+                let name_text = truncate(name, avail);
+
+                let mut spans = Vec::new();
+                if !prefix.is_empty() {
+                    spans.push(Span::styled(
+                        prefix.clone(),
+                        Style::default().fg(TREE_GUIDE).bg(BASE_BG),
+                    ));
+                }
+                spans.push(Span::styled(
+                    name_text,
+                    Style::default().fg(name_fg).bg(BASE_BG),
+                ));
+                Row::new(vec![Cell::from(Line::from(spans))])
+                    .style(Style::default().fg(FG).bg(BASE_BG))
+            }
+            ListItem::SessionItem(session) => {
+                let is_current = app.is_current_session(session);
+                let name_fg = if is_current { ACCENT } else { GREEN };
+                let indicator = if is_current { "\u{25c6}" } else { " " };
+                let avail = max_name_w.saturating_sub(2);
+                let name_text = truncate(&session.name, avail);
+
+                Row::new(vec![Cell::from(Line::from(vec![
+                    Span::styled(
+                        format!("{indicator} "),
+                        Style::default().fg(if is_current { ACCENT } else { FG }).bg(BASE_BG),
+                    ),
+                    Span::styled(
+                        name_text,
+                        Style::default().fg(name_fg).bg(BASE_BG),
+                    ),
+                ]))])
+                .style(Style::default().fg(FG).bg(BASE_BG))
+            }
+        })
+        .collect();
+
+    if app.selectable_indices.is_empty() {
+        let msg = if !app.search_input.is_empty() { "No matches" } else { "No sessions" };
+        let empty_rows = vec![Row::new(vec![Cell::from(Span::styled(
+            msg,
+            Style::default().fg(DIM).bg(BASE_BG),
+        ))])];
+        let table = Table::new(empty_rows, [Constraint::Min(0)])
+            .style(Style::default().fg(FG).bg(BASE_BG));
+        f.render_widget(table, list_area);
+    } else {
+        let table = Table::new(rows, [Constraint::Min(0)])
+            .style(Style::default().fg(FG).bg(BASE_BG))
+            .row_highlight_style(
+                Style::default()
+                    .bg(HIGHLIGHT_BG)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("\u{2588} ");
+
+        let mut state = TableState::default();
+        state.select(selected_visual_row);
+        f.render_stateful_widget(table, list_area, &mut state);
+    }
+
+    // Draw search bar inside sidebar
+    if let Some(search_area) = search_area {
+        let cursor = if app.mode == Mode::Searching { "\u{2502}" } else { "" };
+        let line = Line::from(vec![
+            Span::styled("/", Style::default().fg(MATCH_FG).bg(SEARCH_BG).add_modifier(Modifier::BOLD)),
+            Span::styled(app.search_input.clone(), Style::default().fg(FG_BRIGHT).bg(SEARCH_BG)),
+            Span::styled(cursor.to_string(), Style::default().fg(MATCH_FG).bg(SEARCH_BG)),
+        ]);
+        f.render_widget(
+            Paragraph::new(line).style(Style::default().fg(FG).bg(SEARCH_BG)),
+            search_area,
+        );
+    }
+}
+
+fn draw_sidebar_empty_content(f: &mut Frame, _app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER_FG).bg(BASE_BG))
+        .style(Style::default().fg(FG).bg(BASE_BG));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Center a hint message
+    let msg = "Select a session and press Enter";
+    let msg_w = msg.len() as u16;
+    if inner.width >= msg_w && inner.height >= 1 {
+        let x = inner.x + (inner.width.saturating_sub(msg_w)) / 2;
+        let y = inner.y + inner.height / 2;
+        let hint_area = Rect::new(x, y, msg_w, 1);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                msg,
+                Style::default().fg(DIM).bg(BASE_BG),
+            ))),
+            hint_area,
+        );
+    }
+}
+
+fn draw_attached_in_area(f: &mut Frame, app: &App, area: Rect) {
+    let content_focused = app.sidebar_focus == SidebarFocus::Content;
+    let border_color = if content_focused { ACTIVE_PANE_BORDER } else { BORDER_FG };
+
+    let is_two_pane = app.pty_right.is_some();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color).bg(BASE_BG))
+        .style(Style::default().fg(FG).bg(BASE_BG))
+        .title(Line::from(vec![
+            Span::styled(
+                format!(" {} ", app.attached_name),
+                Style::default().fg(FG_BRIGHT).bg(BASE_BG),
+            ),
+        ]));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if is_two_pane {
+        // Two-pane: split inner area 60% | 1-col separator | 40%
+        let total_w = inner.width;
+        let left_w = (total_w.saturating_sub(1)) * 60 / 100;
+        let right_w = total_w.saturating_sub(1).saturating_sub(left_w);
+
+        let left_area = Rect::new(inner.x, inner.y, left_w, inner.height);
+        let sep_x = inner.x + left_w;
+        let right_area = Rect::new(sep_x + 1, inner.y, right_w, inner.height);
+
+        // Draw vertical separator
+        let buf = f.buffer_mut();
+        for y in inner.top()..inner.bottom() {
+            if let Some(cell) = buf.cell_mut((sep_x, y)) {
+                cell.set_fg(SEPARATOR_FG);
+                cell.set_bg(BASE_BG);
+                cell.set_symbol("\u{2502}");
+            }
+        }
+
+        // Mark left pane cells as skip
+        for y in left_area.top()..left_area.bottom() {
+            for x in left_area.left()..left_area.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.skip = true;
+                }
+            }
+        }
+
+        // Mark right pane cells as skip
+        for y in right_area.top()..right_area.bottom() {
+            for x in right_area.left()..right_area.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.skip = true;
+                }
+            }
+        }
+    } else {
+        // Single pane: mark inner area cells as skip
+        let buf = f.buffer_mut();
+        for y in inner.top()..inner.bottom() {
+            for x in inner.left()..inner.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.skip = true;
+                }
+            }
+        }
+    }
+}
+
+/// Compute sidebar content area geometry for PTY rendering.
+/// Returns (inner_x, inner_y, inner_w, inner_h) — the area inside the content box border.
+pub fn sidebar_geometry(app: &App, cols: u16, rows: u16) -> (u16, u16, u16, u16) {
+    let sw = app.sidebar_width(cols);
+    let content_x = sw;
+    let content_w = cols.saturating_sub(sw);
+    // Content box has 1-cell border on all sides
+    let inner_x = content_x + 1;
+    let inner_y = 1u16;
+    let inner_w = content_w.saturating_sub(2);
+    let inner_h = rows.saturating_sub(2);
+    (inner_x, inner_y, inner_w, inner_h)
+}
+
+/// Compute two-pane geometry within sidebar content area.
+/// Returns (left_x, left_w, right_x, right_w, inner_y, inner_h).
+pub fn sidebar_two_pane_geometry(app: &App, cols: u16, rows: u16) -> (u16, u16, u16, u16, u16, u16) {
+    let (inner_x, inner_y, inner_w, inner_h) = sidebar_geometry(app, cols, rows);
+    let left_w = (inner_w.saturating_sub(1)) * 60 / 100;
+    let right_w = inner_w.saturating_sub(1).saturating_sub(left_w);
+    let left_x = inner_x;
+    let right_x = inner_x + left_w + 1;
+    (left_x, left_w, right_x, right_w, inner_y, inner_h)
 }
 
 // ── Attached PTY view ───────────────────────────────────────

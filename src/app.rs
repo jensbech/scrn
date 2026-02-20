@@ -30,6 +30,12 @@ pub enum Pane {
     Right,
 }
 
+#[derive(PartialEq, Clone, Copy)]
+pub enum SidebarFocus {
+    List,
+    Content,
+}
+
 #[derive(Clone)]
 pub enum ListItem {
     SectionHeader(String),
@@ -79,10 +85,12 @@ pub struct App {
     pub filter_opened: bool,
     /// pinned session/repo names — always shown at top
     pub pins: HashSet<String>,
+    pub sidebar_mode: bool,
+    pub sidebar_focus: SidebarFocus,
 }
 
 impl App {
-    pub fn new(action_file: Option<String>, workspace: Option<PathBuf>) -> Self {
+    pub fn new(action_file: Option<String>, workspace: Option<PathBuf>, sidebar_mode: bool) -> Self {
         Self {
             sessions: Vec::new(),
             all_sessions: Vec::new(),
@@ -113,6 +121,8 @@ impl App {
             history: load_history(),
             filter_opened: false,
             pins: load_pins(),
+            sidebar_mode,
+            sidebar_focus: SidebarFocus::List,
         }
     }
 
@@ -510,13 +520,13 @@ impl App {
     }
 
     pub fn confirm_search(&mut self) {
-        self.mode = Mode::Normal;
+        self.mode = self.return_to_list_mode();
     }
 
     pub fn clear_search(&mut self) {
         self.search_input.clear();
         self.apply_search_filter();
-        self.mode = Mode::Normal;
+        self.mode = self.return_to_list_mode();
     }
 
     pub fn selected_display_item(&self) -> Option<&ListItem> {
@@ -532,8 +542,7 @@ impl App {
                 return;
             }
         }
-        let pty_rows = term_rows.saturating_sub(2);
-        let pty_cols = term_cols.saturating_sub(2);
+        let (pty_rows, pty_cols) = self.pty_area(term_rows, term_cols);
         let rc = crate::screen::ensure_screenrc();
         self.screen_history_left = crate::screen::dump_scrollback(pid_name);
         match PtySession::spawn("screen", &["-c", &rc, "-d", "-r", pid_name], pty_rows, pty_cols) {
@@ -569,8 +578,7 @@ impl App {
             .find(|s| s.name == right_name)
             .map(|s| s.pid_name.clone());
 
-        let pty_rows = term_rows.saturating_sub(2);
-        let total_inner_cols = term_cols.saturating_sub(2);
+        let (pty_rows, total_inner_cols) = self.pty_area(term_rows, term_cols);
         // 60/40 split with 1-col separator
         let left_cols = (total_inner_cols.saturating_sub(1)) * 60 / 100;
         let right_cols = total_inner_cols.saturating_sub(1).saturating_sub(left_cols);
@@ -652,8 +660,7 @@ impl App {
                     self.attach_session(&session.name, &session.pid_name, term_rows, term_cols);
                 } else {
                     // Create + attach in one step so the shell starts at the correct PTY size
-                    let pty_rows = term_rows.saturating_sub(2);
-                    let pty_cols = term_cols.saturating_sub(2);
+                    let (pty_rows, pty_cols) = self.pty_area(term_rows, term_cols);
                     let rc = crate::screen::ensure_screenrc();
                     match PtySession::spawn_in_dir(
                         "screen",
@@ -719,6 +726,7 @@ impl App {
         self.attached_name.clear();
         self.attached_right_name.clear();
         self.active_pane = Pane::Left;
+        self.sidebar_focus = SidebarFocus::List;
         self.mode = Mode::Normal;
         self.refresh_sessions();
     }
@@ -733,11 +741,10 @@ impl App {
     }
 
     pub fn resize_pty(&mut self, term_rows: u16, term_cols: u16) {
-        let pty_rows = term_rows.saturating_sub(2);
+        let (pty_rows, total_inner_cols) = self.pty_area(term_rows, term_cols);
 
         if self.pty_right.is_some() {
             // Two-pane mode: recalculate 60/40 split
-            let total_inner_cols = term_cols.saturating_sub(2);
             let left_cols = (total_inner_cols.saturating_sub(1)) * 60 / 100;
             let right_cols = total_inner_cols.saturating_sub(1).saturating_sub(left_cols);
 
@@ -749,10 +756,18 @@ impl App {
             }
         } else {
             // Single pane
-            let pty_cols = term_cols.saturating_sub(2);
             if let Some(ref mut pty) = self.pty_session {
-                pty.resize(pty_rows, pty_cols);
+                pty.resize(pty_rows, total_inner_cols);
             }
+        }
+    }
+
+    /// Return to the appropriate mode: Attached if PTY is alive (sidebar), Normal otherwise.
+    fn return_to_list_mode(&self) -> Mode {
+        if self.pty_session.is_some() {
+            Mode::Attached
+        } else {
+            Mode::Normal
         }
     }
 
@@ -765,7 +780,7 @@ impl App {
     pub fn confirm_create(&mut self) {
         let name = self.create_input.trim().to_string();
         if name.is_empty() {
-            self.mode = Mode::Normal;
+            self.mode = self.return_to_list_mode();
             return;
         }
         match screen::create_session(&name) {
@@ -777,11 +792,11 @@ impl App {
                 self.set_status(format!("Error: {e}"));
             }
         }
-        self.mode = Mode::Normal;
+        self.mode = self.return_to_list_mode();
     }
 
     pub fn cancel_create(&mut self) {
-        self.mode = Mode::Normal;
+        self.mode = self.return_to_list_mode();
     }
 
     pub fn start_rename(&mut self) {
@@ -796,7 +811,7 @@ impl App {
     pub fn confirm_rename(&mut self) {
         let new_name = self.create_input.trim().to_string();
         if new_name.is_empty() {
-            self.mode = Mode::Normal;
+            self.mode = self.return_to_list_mode();
             return;
         }
         match screen::rename_session(&self.rename_pid_name, &new_name) {
@@ -808,11 +823,11 @@ impl App {
                 self.set_status(format!("Error: {e}"));
             }
         }
-        self.mode = Mode::Normal;
+        self.mode = self.return_to_list_mode();
     }
 
     pub fn cancel_rename(&mut self) {
-        self.mode = Mode::Normal;
+        self.mode = self.return_to_list_mode();
     }
 
     pub fn start_kill(&mut self) {
@@ -843,12 +858,12 @@ impl App {
                 }
             }
         }
-        self.mode = Mode::Normal;
+        self.mode = self.return_to_list_mode();
     }
 
     pub fn cancel_kill(&mut self) {
         self.kill_session_info = None;
-        self.mode = Mode::Normal;
+        self.mode = self.return_to_list_mode();
     }
 
     pub fn start_kill_all(&mut self) {
@@ -879,11 +894,11 @@ impl App {
             self.set_status(format!("Killed {killed}, {} errors", errors.len()));
         }
         self.refresh_sessions();
-        self.mode = Mode::Normal;
+        self.mode = self.return_to_list_mode();
     }
 
     pub fn cancel_kill_all(&mut self) {
-        self.mode = Mode::Normal;
+        self.mode = self.return_to_list_mode();
     }
 
     pub fn go_home(&mut self) {
@@ -896,6 +911,68 @@ impl App {
         self.current_session
             .as_ref()
             .is_some_and(|current| *current == session.pid_name)
+    }
+
+    /// Sidebar width: 20% of terminal, clamped to [20, 40].
+    pub fn sidebar_width(&self, term_cols: u16) -> u16 {
+        let w = term_cols / 5;
+        w.clamp(20, 40)
+    }
+
+    /// Effective PTY area when sidebar is active, subtracting sidebar + its border.
+    /// Returns (effective_rows, effective_cols).
+    pub fn pty_area(&self, term_rows: u16, term_cols: u16) -> (u16, u16) {
+        if self.sidebar_mode {
+            let sw = self.sidebar_width(term_cols);
+            // sidebar takes sw cols (including its right border), content area gets the rest
+            // content area has its own 1-col border on right, 1 row top + 1 row bottom
+            let content_cols = term_cols.saturating_sub(sw);
+            let pty_cols = content_cols.saturating_sub(2); // left border + right border of content box
+            let pty_rows = term_rows.saturating_sub(2);
+            (pty_rows, pty_cols)
+        } else {
+            (term_rows.saturating_sub(2), term_cols.saturating_sub(2))
+        }
+    }
+
+    /// Switch to a different session in sidebar mode: detach current, attach selected.
+    pub fn sidebar_switch_session(&mut self, term_rows: u16, term_cols: u16) {
+        // Detach current PTY without leaving Attached mode
+        if let Some(ref pty) = self.pty_session {
+            if !self.attached_name.is_empty() {
+                save_snapshot(&self.attached_name, pty.screen());
+            }
+            pty.write_all(b"\x01d");
+        }
+        if let Some(ref pty) = self.pty_right {
+            if !self.attached_right_name.is_empty() {
+                save_snapshot(&self.attached_right_name, pty.screen());
+            }
+            pty.write_all(b"\x01d");
+        }
+        // Wait briefly for clean detach
+        let deadline = Instant::now() + Duration::from_millis(50);
+        while Instant::now() < deadline {
+            let left_done = self.pty_session.as_mut().map_or(true, |p| !p.is_running());
+            let right_done = self.pty_right.as_mut().map_or(true, |p| !p.is_running());
+            if left_done && right_done { break; }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.pty_session = None;
+        self.pty_right = None;
+        self.screen_history_left.clear();
+        self.screen_history_right.clear();
+        self.attached_name.clear();
+        self.attached_right_name.clear();
+        self.active_pane = Pane::Left;
+        self.mode = Mode::Normal;
+        self.refresh_sessions();
+
+        // Now attach the selected session
+        self.attach_selected(term_rows, term_cols);
+        if self.mode == Mode::Attached {
+            self.sidebar_focus = SidebarFocus::Content;
+        }
     }
 
     fn record_opened(&mut self, name: &str) {
