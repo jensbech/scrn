@@ -87,6 +87,8 @@ pub struct App {
     pub pins: HashSet<String>,
     pub sidebar_mode: bool,
     pub sidebar_focus: SidebarFocus,
+    /// Table scroll offset from last render, used for click-to-select.
+    pub sidebar_table_offset: std::cell::Cell<usize>,
 }
 
 impl App {
@@ -123,6 +125,7 @@ impl App {
             pins: load_pins(),
             sidebar_mode,
             sidebar_focus: SidebarFocus::List,
+            sidebar_table_offset: std::cell::Cell::new(0),
         }
     }
 

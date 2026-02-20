@@ -1145,6 +1145,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         let mut state = TableState::default();
         state.select(selected_visual_row);
         f.render_stateful_widget(table, list_area, &mut state);
+        app.sidebar_table_offset.set(state.offset());
     }
 
     // Draw search bar inside sidebar
@@ -1190,9 +1191,17 @@ fn draw_sidebar_empty_content(f: &mut Frame, _app: &App, area: Rect) {
 
 fn draw_attached_in_area(f: &mut Frame, app: &App, area: Rect) {
     let content_focused = app.sidebar_focus == SidebarFocus::Content;
-    let border_color = if content_focused { ACTIVE_PANE_BORDER } else { BORDER_FG };
-
     let is_two_pane = app.pty_right.is_some();
+
+    // In two-pane mode, start with dim border; active pane highlighting is applied after.
+    // In single-pane mode, highlight the whole border when content is focused.
+    let border_color = if is_two_pane {
+        BORDER_FG
+    } else if content_focused {
+        ACTIVE_PANE_BORDER
+    } else {
+        BORDER_FG
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1225,6 +1234,70 @@ fn draw_attached_in_area(f: &mut Frame, app: &App, area: Rect) {
                 cell.set_fg(SEPARATOR_FG);
                 cell.set_bg(BASE_BG);
                 cell.set_symbol("\u{2502}");
+            }
+        }
+
+        // Highlight active pane border
+        let c = ACTIVE_PANE_BORDER;
+        let bx = area.x;
+        let by = area.y;
+        let bw = area.width;
+        let bh = area.height;
+
+        match app.active_pane {
+            Pane::Left => {
+                // Top edge: left corner to separator
+                for x in bx..sep_x {
+                    if let Some(cell) = buf.cell_mut((x, by)) { cell.set_fg(c); }
+                }
+                // Bottom edge
+                for x in bx..sep_x {
+                    if let Some(cell) = buf.cell_mut((x, by + bh - 1)) { cell.set_fg(c); }
+                }
+                // Left side
+                for y in by..by + bh {
+                    if let Some(cell) = buf.cell_mut((bx, y)) { cell.set_fg(c); }
+                }
+                // Separator
+                for y in inner.top()..inner.bottom() {
+                    if let Some(cell) = buf.cell_mut((sep_x, y)) { cell.set_fg(c); }
+                }
+                // Junction corners
+                if let Some(cell) = buf.cell_mut((sep_x, by)) {
+                    cell.set_symbol("\u{2510}"); // ┐
+                    cell.set_fg(c);
+                }
+                if let Some(cell) = buf.cell_mut((sep_x, by + bh - 1)) {
+                    cell.set_symbol("\u{2518}"); // ┘
+                    cell.set_fg(c);
+                }
+            }
+            Pane::Right => {
+                // Top edge: after separator to right corner
+                for x in (sep_x + 1)..bx + bw {
+                    if let Some(cell) = buf.cell_mut((x, by)) { cell.set_fg(c); }
+                }
+                // Bottom edge
+                for x in (sep_x + 1)..bx + bw {
+                    if let Some(cell) = buf.cell_mut((x, by + bh - 1)) { cell.set_fg(c); }
+                }
+                // Right side
+                for y in by..by + bh {
+                    if let Some(cell) = buf.cell_mut((bx + bw - 1, y)) { cell.set_fg(c); }
+                }
+                // Separator
+                for y in inner.top()..inner.bottom() {
+                    if let Some(cell) = buf.cell_mut((sep_x, y)) { cell.set_fg(c); }
+                }
+                // Junction corners
+                if let Some(cell) = buf.cell_mut((sep_x, by)) {
+                    cell.set_symbol("\u{250c}"); // ┌
+                    cell.set_fg(c);
+                }
+                if let Some(cell) = buf.cell_mut((sep_x, by + bh - 1)) {
+                    cell.set_symbol("\u{2514}"); // └
+                    cell.set_fg(c);
+                }
             }
         }
 

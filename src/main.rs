@@ -186,6 +186,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Mouse text selection: (pane, selection coordinates in pane-local space)
     let mut selection: Option<(Pane, ui::PaneSelection)> = None;
 
+    // Double-click tracking for sidebar
+    let mut last_sidebar_click: Option<(Instant, usize)> = None; // (time, selected index)
+
     loop {
         // ── 1. Drain PTY output (fast — just memcpy + vt100 parse) ──
         if app.mode == Mode::Attached {
@@ -942,27 +945,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Event::Mouse(mouse) => {
-                    if app.mode == Mode::Attached {
-                        // In sidebar mode, check if click is in sidebar area
-                        let in_sidebar = app.sidebar_mode && mouse.column < app.sidebar_width(term_cols);
+                    // Sidebar click handling — works in both Normal and Attached modes
+                    let in_sidebar = app.sidebar_mode && mouse.column < app.sidebar_width(term_cols);
 
-                        if in_sidebar {
-                            match mouse.kind {
-                                MouseEventKind::Down(MouseButton::Left) => {
+                    if in_sidebar {
+                        match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                if app.mode == Mode::Attached {
                                     app.sidebar_focus = SidebarFocus::List;
-                                    ui_needs_draw = true;
                                 }
-                                MouseEventKind::ScrollUp => {
-                                    app.move_up();
-                                    ui_needs_draw = true;
+                                // Map click y to a list item.
+                                // Sidebar block border = 1 row at top, so list starts at y=1.
+                                let list_top = 1u16;
+                                if mouse.row >= list_top {
+                                    let relative_row = (mouse.row - list_top) as usize;
+                                    let abs_row = relative_row + app.sidebar_table_offset.get();
+                                    // Find which selectable index maps to this display row
+                                    if let Some(sel_idx) = app.selectable_indices.iter().position(|&di| di == abs_row) {
+                                        // Double-click detection: same item within 400ms
+                                        let now = Instant::now();
+                                        if let Some((prev_time, prev_idx)) = last_sidebar_click {
+                                            if prev_idx == sel_idx && now.duration_since(prev_time) < Duration::from_millis(400) {
+                                                // Double-click: act like Enter
+                                                last_sidebar_click = None;
+                                                let (cols, rows) = (term_cols, term_rows);
+                                                prev_screen_left = None;
+                                                prev_screen_right = None;
+                                                scroll_offset_left = 0;
+                                                scroll_offset_right = 0;
+                                                if app.mode == Mode::Attached {
+                                                    app.sidebar_switch_session(rows, cols);
+                                                } else {
+                                                    app.attach_selected(rows, cols);
+                                                    if app.mode == Mode::Attached {
+                                                        app.sidebar_focus = SidebarFocus::Content;
+                                                    }
+                                                }
+                                                if app.mode == Mode::Attached {
+                                                    pty_needs_render = true;
+                                                }
+                                            } else {
+                                                last_sidebar_click = Some((now, sel_idx));
+                                            }
+                                        } else {
+                                            last_sidebar_click = Some((now, sel_idx));
+                                        }
+                                        app.selected = sel_idx;
+                                    }
                                 }
-                                MouseEventKind::ScrollDown => {
-                                    app.move_down();
-                                    ui_needs_draw = true;
-                                }
-                                _ => {}
+                                ui_needs_draw = true;
                             }
-                        } else {
+                            MouseEventKind::ScrollUp => {
+                                app.move_up();
+                                ui_needs_draw = true;
+                            }
+                            MouseEventKind::ScrollDown => {
+                                app.move_down();
+                                ui_needs_draw = true;
+                            }
+                            _ => {}
+                        }
+                    } else if app.mode == Mode::Attached {
                             // Content area (or non-sidebar mode)
                             if app.sidebar_mode && app.sidebar_focus == SidebarFocus::List {
                                 app.sidebar_focus = SidebarFocus::Content;
@@ -971,6 +1014,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             match mouse.kind {
                                 MouseEventKind::Down(MouseButton::Left) => {
                                     if let Some((pane, row, col)) = hit_test_pane(&app, mouse.column, mouse.row, term_cols, term_rows) {
+                                        // Activate the clicked pane
+                                        if app.pty_right.is_some() && app.active_pane != pane {
+                                            app.active_pane = pane;
+                                            ui_needs_draw = true;
+                                        }
                                         selection = Some((pane, ui::PaneSelection {
                                             start_row: row,
                                             start_col: col,
@@ -1010,7 +1058,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 MouseEventKind::ScrollUp => {
-                                    let offset = match app.active_pane {
+                                    // Scroll the pane under the mouse cursor
+                                    let pane = hit_test_pane(&app, mouse.column, mouse.row, term_cols, term_rows)
+                                        .map(|(p, _, _)| p)
+                                        .unwrap_or(app.active_pane);
+                                    let offset = match pane {
                                         Pane::Left => &mut scroll_offset_left,
                                         Pane::Right => &mut scroll_offset_right,
                                     };
@@ -1018,7 +1070,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     pty_needs_render = true;
                                 }
                                 MouseEventKind::ScrollDown => {
-                                    let offset = match app.active_pane {
+                                    let pane = hit_test_pane(&app, mouse.column, mouse.row, term_cols, term_rows)
+                                        .map(|(p, _, _)| p)
+                                        .unwrap_or(app.active_pane);
+                                    let offset = match pane {
                                         Pane::Left => &mut scroll_offset_left,
                                         Pane::Right => &mut scroll_offset_right,
                                     };
@@ -1027,8 +1082,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 _ => {}
                             }
-                        }
                     } else {
+                        // Non-sidebar, non-attached: scroll list
                         match mouse.kind {
                             MouseEventKind::ScrollUp => app.move_up(),
                             MouseEventKind::ScrollDown => app.move_down(),
