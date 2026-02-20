@@ -43,6 +43,11 @@ pub fn ensure_screenrc() -> String {
         content.push_str(&format!("source {}\n", user_rc.display()));
     }
     content.push_str("truecolor on\n");
+    // Pass alternate screen sequences through to the client terminal so
+    // scrn's vt100 parser correctly switches buffers when apps enter/exit
+    // full-screen mode. Without this, screen handles altscreen internally
+    // and only sends diffs, leaving stale content in the parser.
+    content.push_str("altscreen on\n");
 
     let _ = fs::write(&path, &content);
     path.to_string_lossy().into_owned()

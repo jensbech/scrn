@@ -127,8 +127,19 @@ impl PtySession {
 
     /// Resize the PTY and internal parser.
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        // Drain any pending output at the old size before switching dimensions
+        self.try_read();
         self.parser.set_size(rows, cols);
         set_pty_size(self.master.as_raw_fd(), rows, cols);
+        // Explicitly signal the child in case TIOCSWINSZ didn't deliver SIGWINCH
+        unsafe {
+            libc::kill(self.child.id() as i32, libc::SIGWINCH);
+        }
+    }
+
+    /// Whether the terminal is in alternate screen mode.
+    pub fn alternate_screen(&self) -> bool {
+        self.parser.screen().alternate_screen()
     }
 
     /// Check if the child process is still running.

@@ -173,6 +173,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scroll_offset_left: usize = 0;
     let mut scroll_offset_right: usize = 0;
 
+    // Track alternate screen state to force full redraw on mode change
+    let mut alt_screen_left = false;
+    let mut alt_screen_right = false;
+
+
     // Mouse text selection: (pane, selection coordinates in pane-local space)
     let mut selection: Option<(Pane, ui::PaneSelection)> = None;
 
@@ -214,6 +219,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             pty_needs_render = pty_needs_render || left_dirty || right_dirty;
+
+            // Force full redraw when alternate screen mode changes (app enter/exit)
+            if let Some(ref pty) = app.pty_session {
+                let alt = pty.alternate_screen();
+                if alt != alt_screen_left {
+                    alt_screen_left = alt;
+                    prev_screen_left = None;
+                }
+            }
+            if let Some(ref pty) = app.pty_right {
+                let alt = pty.alternate_screen();
+                if alt != alt_screen_right {
+                    alt_screen_right = alt;
+                    prev_screen_right = None;
+                }
+            }
+
         }
 
         // ── 2. Render (rate-limited, skip ratatui on PTY-only frames) ──
