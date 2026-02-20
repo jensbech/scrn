@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.svg" alt="scrn" width="120" />
+  <img src="logo.svg" alt="scrn" width="300" />
 </p>
 
 <h1 align="center">scrn</h1>
