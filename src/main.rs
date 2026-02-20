@@ -23,7 +23,13 @@ use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{Action, App, Mode, Pane};
+use app::{Action, App, Mode, Pane, SidebarFocus};
+
+#[derive(Clone, Copy, PartialEq)]
+enum ResizeDrag {
+    Sidebar,
+    Split,
+}
 
 /// Poll stdin and PTY file descriptors simultaneously.
 /// Returns (stdin_ready, pty_ready) so the caller can drain PTY data
@@ -109,6 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse flags
     let mut action_file = None;
     let mut cli_workspace = None;
+    let mut sidebar_mode = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -126,12 +133,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
             }
+            "--sidebar" | "-s" => {
+                sidebar_mode = true;
+            }
             _ => {}
         }
         i += 1;
     }
 
     let cfg = config::Config::load(cli_workspace.as_deref());
+    let sidebar = sidebar_mode || cfg.sidebar;
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
@@ -147,7 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     terminal.clear()?;
 
-    let mut app = App::new(action_file, cfg.workspace);
+    let mut app = App::new(action_file, cfg.workspace, sidebar);
     app.refresh_sessions();
     app.restore_sessions();
 
@@ -180,6 +191,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Mouse text selection: (pane, selection coordinates in pane-local space)
     let mut selection: Option<(Pane, ui::PaneSelection)> = None;
+
+    // Double-click tracking for sidebar
+    let mut last_sidebar_click: Option<(Instant, usize)> = None; // (time, selected index)
+
+    // Active resize drag
+    let mut resize_drag: Option<ResizeDrag> = None;
 
     loop {
         // ── 1. Drain PTY output (fast — just memcpy + vt100 parse) ──
@@ -258,7 +275,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if app.pty_right.is_some() {
                     let (left_x, left_w, right_x, right_w, inner_y, inner_h) =
-                        ui::two_pane_geometry(cols, rows);
+                        if app.sidebar_mode {
+                            ui::sidebar_two_pane_geometry(&app, cols, rows)
+                        } else {
+                            ui::two_pane_geometry(&app, cols, rows)
+                        };
 
                     if pty_needs_render {
                         // Force full redraw when text selection is active
@@ -398,10 +419,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 } else {
-                    let inner_x = 1u16;
-                    let inner_y = 1u16;
-                    let inner_w = cols.saturating_sub(2);
-                    let inner_h = rows.saturating_sub(2);
+                    let (inner_x, inner_y, inner_w, inner_h) = if app.sidebar_mode {
+                        ui::sidebar_geometry(&app, cols, rows)
+                    } else {
+                        (1u16, 1u16, cols.saturating_sub(2), rows.saturating_sub(2))
+                    };
 
                     if pty_needs_render {
                         // Force full redraw when text selection is active
@@ -543,6 +565,89 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if has_event {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => match app.mode {
+                    Mode::Attached if app.sidebar_mode && app.sidebar_focus == SidebarFocus::List => {
+                        // Sidebar mode, focus on list: navigate sessions
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                app.move_up();
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                app.move_down();
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Char('g') => {
+                                app.move_to_top();
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Char('G') => {
+                                app.move_to_bottom();
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Enter => {
+                                let (cols, rows) = (term_cols, term_rows);
+                                prev_screen_left = None;
+                                prev_screen_right = None;
+                                scroll_offset_left = 0;
+                                scroll_offset_right = 0;
+                                app.sidebar_switch_session(rows, cols);
+                                if app.mode == Mode::Attached {
+                                    pty_needs_render = true;
+                                    ui_needs_draw = true;
+                                }
+                            }
+                            KeyCode::Tab => {
+                                app.sidebar_focus = SidebarFocus::Content;
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Char('/') => {
+                                app.start_search();
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Char('c') => {
+                                app.start_create();
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Char('x') => {
+                                app.start_kill();
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Char('n') => {
+                                app.start_rename();
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Char('q') => {
+                                app.mode = Mode::ConfirmQuit;
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Esc => {
+                                if !app.search_input.is_empty() {
+                                    app.clear_search();
+                                    ui_needs_draw = true;
+                                } else {
+                                    app.mode = Mode::ConfirmQuit;
+                                    ui_needs_draw = true;
+                                }
+                            }
+                            KeyCode::Char('o') => {
+                                app.toggle_opened_filter();
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Char('p') => {
+                                app.toggle_pin();
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Char('r') => {
+                                app.refresh_sessions();
+                                ui_needs_draw = true;
+                            }
+                            KeyCode::Char('?') => {
+                                app.show_legend = !app.show_legend;
+                                ui_needs_draw = true;
+                            }
+                            _ => {}
+                        }
+                    }
                     Mode::Attached => {
                         // Clear text selection on any key press
                         if selection.is_some() {
@@ -589,15 +694,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             handled = true;
                         }
 
-                        // Ctrl+O — detach and go back to session list
+                        // Ctrl+O — in sidebar mode: switch focus to list; otherwise: detach
                         if !handled && is_ctrl && key.code == KeyCode::Char('o') {
                             last_esc = None;
-                            prev_screen_left = None;
-                            prev_screen_right = None;
-                            scroll_offset_left = 0;
-                            scroll_offset_right = 0;
-                            app.detach_pty();
-                            selection = None;
+                            if app.sidebar_mode {
+                                app.sidebar_focus = SidebarFocus::List;
+                                ui_needs_draw = true;
+                            } else {
+                                prev_screen_left = None;
+                                prev_screen_right = None;
+                                scroll_offset_left = 0;
+                                scroll_offset_right = 0;
+                                app.detach_pty();
+                                selection = None;
+                            }
                             handled = true;
                         }
 
@@ -712,6 +822,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let (cols, rows) = (term_cols, term_rows);
                             app.attach_selected(rows, cols);
                             if app.mode == Mode::Attached {
+                                if app.sidebar_mode {
+                                    app.sidebar_focus = SidebarFocus::Content;
+                                }
                                 pty_needs_render = true;
                                 ui_needs_draw = true;
                                 prev_screen_left = None;
@@ -809,7 +922,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             break;
                         }
                         KeyCode::Char('n') | KeyCode::Esc => {
-                            app.mode = Mode::Normal;
+                            // If PTY is still alive (sidebar mode), return to Attached
+                            if app.pty_session.is_some() {
+                                app.mode = Mode::Attached;
+                            } else {
+                                app.mode = Mode::Normal;
+                            }
                         }
                         _ => {}
                     },
@@ -832,73 +950,218 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Event::Mouse(mouse) => {
-                    if app.mode == Mode::Attached {
+                    // ── Resize drag handling ────────────────────────────────
+                    let sw = app.sidebar_width(term_cols);
+
+                    // Compute split separator column (if two-pane)
+                    let split_sep_x: Option<u16> = if app.pty_right.is_some() {
+                        let (left_x, left_w, _, _, _, _) = if app.sidebar_mode {
+                            ui::sidebar_two_pane_geometry(&app, term_cols, term_rows)
+                        } else {
+                            ui::two_pane_geometry(&app, term_cols, term_rows)
+                        };
+                        Some(left_x + left_w)
+                    } else {
+                        None
+                    };
+
+                    // Detect resize zone: sidebar border (col sw-1 or sw) or split separator
+                    let on_sidebar_border = app.sidebar_mode
+                        && (mouse.column == sw.saturating_sub(1) || mouse.column == sw);
+                    let on_split_sep = split_sep_x.map_or(false, |sx| mouse.column == sx);
+
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) if on_sidebar_border => {
+                            resize_drag = Some(ResizeDrag::Sidebar);
+                            selection = None;
+                        }
+                        MouseEventKind::Down(MouseButton::Left) if on_split_sep => {
+                            resize_drag = Some(ResizeDrag::Split);
+                            selection = None;
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) if resize_drag == Some(ResizeDrag::Sidebar) => {
+                            // New sidebar width: right border lands on mouse.column
+                            let new_w = (mouse.column + 1).clamp(10, term_cols.saturating_sub(20));
+                            app.sidebar_width_user = Some(new_w);
+                            pty_needs_render = true;
+                            ui_needs_draw = true;
+                            prev_screen_left = None;
+                            prev_screen_right = None;
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) if resize_drag == Some(ResizeDrag::Split) => {
+                            // Recompute split pct from mouse position
+                            let (inner_x, _, inner_w, _) = if app.sidebar_mode {
+                                ui::sidebar_geometry(&app, term_cols, term_rows)
+                            } else {
+                                (1u16, 1u16, term_cols.saturating_sub(2), term_rows.saturating_sub(2))
+                            };
+                            let avail = inner_w.saturating_sub(1) as u32;
+                            if avail > 0 {
+                                let offset = mouse.column.saturating_sub(inner_x) as u32;
+                                let pct = (offset * 100 / avail).clamp(20, 80);
+                                app.split_left_pct = pct;
+                            }
+                            pty_needs_render = true;
+                            ui_needs_draw = true;
+                            prev_screen_left = None;
+                            prev_screen_right = None;
+                        }
+                        MouseEventKind::Up(MouseButton::Left) if resize_drag.is_some() => {
+                            // Resize PTY to match new layout on release
+                            if app.mode == Mode::Attached {
+                                app.resize_pty(term_rows, term_cols);
+                                pty_needs_render = true;
+                            }
+                            resize_drag = None;
+                        }
+                        _ => {
+                    // Sidebar click handling — works in both Normal and Attached modes
+                    let in_sidebar = app.sidebar_mode && mouse.column < app.sidebar_width(term_cols);
+
+                    if in_sidebar {
                         match mouse.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
-                                if let Some((pane, row, col)) = hit_test_pane(&app, mouse.column, mouse.row, term_cols, term_rows) {
-                                    selection = Some((pane, ui::PaneSelection {
-                                        start_row: row,
-                                        start_col: col,
-                                        end_row: row,
-                                        end_col: col,
-                                    }));
-                                    prev_screen_left = None;
-                                    prev_screen_right = None;
-                                    pty_needs_render = true;
+                                if app.mode == Mode::Attached {
+                                    app.sidebar_focus = SidebarFocus::List;
                                 }
-                            }
-                            MouseEventKind::Drag(MouseButton::Left) => {
-                                if let Some((pane, ref mut sel)) = selection {
-                                    let (row, col) = clamp_to_pane(pane, &app, mouse.column, mouse.row, term_cols, term_rows);
-                                    sel.end_row = row;
-                                    sel.end_col = col;
-                                    prev_screen_left = None;
-                                    prev_screen_right = None;
-                                    pty_needs_render = true;
+                                // Map click y to a list item.
+                                // Sidebar block border = 1 row at top, so list starts at y=1.
+                                let list_top = 1u16;
+                                if mouse.row >= list_top {
+                                    let relative_row = (mouse.row - list_top) as usize;
+                                    let abs_row = relative_row + app.sidebar_table_offset.get();
+                                    // Find which selectable index maps to this display row
+                                    if let Some(sel_idx) = app.selectable_indices.iter().position(|&di| di == abs_row) {
+                                        // Double-click detection: same item within 400ms
+                                        let now = Instant::now();
+                                        if let Some((prev_time, prev_idx)) = last_sidebar_click {
+                                            if prev_idx == sel_idx && now.duration_since(prev_time) < Duration::from_millis(400) {
+                                                // Double-click: act like Enter
+                                                last_sidebar_click = None;
+                                                let (cols, rows) = (term_cols, term_rows);
+                                                prev_screen_left = None;
+                                                prev_screen_right = None;
+                                                scroll_offset_left = 0;
+                                                scroll_offset_right = 0;
+                                                if app.mode == Mode::Attached {
+                                                    app.sidebar_switch_session(rows, cols);
+                                                } else {
+                                                    app.attach_selected(rows, cols);
+                                                    if app.mode == Mode::Attached {
+                                                        app.sidebar_focus = SidebarFocus::Content;
+                                                    }
+                                                }
+                                                if app.mode == Mode::Attached {
+                                                    pty_needs_render = true;
+                                                }
+                                            } else {
+                                                last_sidebar_click = Some((now, sel_idx));
+                                            }
+                                        } else {
+                                            last_sidebar_click = Some((now, sel_idx));
+                                        }
+                                        app.selected = sel_idx;
+                                    }
                                 }
+                                ui_needs_draw = true;
                             }
-                            MouseEventKind::Up(MouseButton::Left) => {
-                                if let Some((pane, ref sel)) = selection {
-                                    if sel.is_non_empty() {
-                                        let screen = match pane {
-                                            Pane::Left => app.pty_session.as_ref().map(|p| p.screen()),
-                                            Pane::Right => app.pty_right.as_ref().map(|p| p.screen()),
-                                        };
-                                        if let Some(screen) = screen {
-                                            let (inner_w, inner_h) = pane_inner_size(pane, &app, term_cols, term_rows);
-                                            let text = ui::extract_selection_text(screen, sel, inner_w, inner_h);
-                                            if !text.is_empty() {
-                                                copy_to_clipboard(&text);
+                            MouseEventKind::ScrollUp => {
+                                app.move_up();
+                                ui_needs_draw = true;
+                            }
+                            MouseEventKind::ScrollDown => {
+                                app.move_down();
+                                ui_needs_draw = true;
+                            }
+                            _ => {}
+                        }
+                    } else if app.mode == Mode::Attached {
+                            // Content area (or non-sidebar mode)
+                            if app.sidebar_mode && app.sidebar_focus == SidebarFocus::List {
+                                app.sidebar_focus = SidebarFocus::Content;
+                                ui_needs_draw = true;
+                            }
+                            match mouse.kind {
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    if let Some((pane, row, col)) = hit_test_pane(&app, mouse.column, mouse.row, term_cols, term_rows) {
+                                        // Activate the clicked pane
+                                        if app.pty_right.is_some() && app.active_pane != pane {
+                                            app.active_pane = pane;
+                                            ui_needs_draw = true;
+                                        }
+                                        selection = Some((pane, ui::PaneSelection {
+                                            start_row: row,
+                                            start_col: col,
+                                            end_row: row,
+                                            end_col: col,
+                                        }));
+                                        prev_screen_left = None;
+                                        prev_screen_right = None;
+                                        pty_needs_render = true;
+                                    }
+                                }
+                                MouseEventKind::Drag(MouseButton::Left) => {
+                                    if let Some((pane, ref mut sel)) = selection {
+                                        let (row, col) = clamp_to_pane(pane, &app, mouse.column, mouse.row, term_cols, term_rows);
+                                        sel.end_row = row;
+                                        sel.end_col = col;
+                                        prev_screen_left = None;
+                                        prev_screen_right = None;
+                                        pty_needs_render = true;
+                                    }
+                                }
+                                MouseEventKind::Up(MouseButton::Left) => {
+                                    if let Some((pane, ref sel)) = selection {
+                                        if sel.is_non_empty() {
+                                            let screen = match pane {
+                                                Pane::Left => app.pty_session.as_ref().map(|p| p.screen()),
+                                                Pane::Right => app.pty_right.as_ref().map(|p| p.screen()),
+                                            };
+                                            if let Some(screen) = screen {
+                                                let (inner_w, inner_h) = pane_inner_size(pane, &app, term_cols, term_rows);
+                                                let text = ui::extract_selection_text(screen, sel, inner_w, inner_h);
+                                                if !text.is_empty() {
+                                                    copy_to_clipboard(&text);
+                                                }
                                             }
                                         }
                                     }
                                 }
+                                MouseEventKind::ScrollUp => {
+                                    // Scroll the pane under the mouse cursor
+                                    let pane = hit_test_pane(&app, mouse.column, mouse.row, term_cols, term_rows)
+                                        .map(|(p, _, _)| p)
+                                        .unwrap_or(app.active_pane);
+                                    let offset = match pane {
+                                        Pane::Left => &mut scroll_offset_left,
+                                        Pane::Right => &mut scroll_offset_right,
+                                    };
+                                    *offset += 3;
+                                    pty_needs_render = true;
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    let pane = hit_test_pane(&app, mouse.column, mouse.row, term_cols, term_rows)
+                                        .map(|(p, _, _)| p)
+                                        .unwrap_or(app.active_pane);
+                                    let offset = match pane {
+                                        Pane::Left => &mut scroll_offset_left,
+                                        Pane::Right => &mut scroll_offset_right,
+                                    };
+                                    *offset = offset.saturating_sub(3);
+                                    pty_needs_render = true;
+                                }
+                                _ => {}
                             }
-                            MouseEventKind::ScrollUp => {
-                                let offset = match app.active_pane {
-                                    Pane::Left => &mut scroll_offset_left,
-                                    Pane::Right => &mut scroll_offset_right,
-                                };
-                                *offset += 3;
-                                pty_needs_render = true;
-                            }
-                            MouseEventKind::ScrollDown => {
-                                let offset = match app.active_pane {
-                                    Pane::Left => &mut scroll_offset_left,
-                                    Pane::Right => &mut scroll_offset_right,
-                                };
-                                *offset = offset.saturating_sub(3);
-                                pty_needs_render = true;
-                            }
-                            _ => {}
-                        }
                     } else {
+                        // Non-sidebar, non-attached: scroll list
                         match mouse.kind {
                             MouseEventKind::ScrollUp => app.move_up(),
                             MouseEventKind::ScrollDown => app.move_down(),
                             _ => {}
                         }
                     }
+                        } // end _ => { (resize fallthrough arm)
+                    }     // end outer match mouse.kind for resize
                 }
                 Event::Resize(cols, rows) => {
                     term_cols = cols;
@@ -947,7 +1210,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn hit_test_pane(app: &App, mx: u16, my: u16, cols: u16, rows: u16) -> Option<(Pane, u16, u16)> {
     if app.pty_right.is_some() {
         let (left_x, left_w, right_x, right_w, inner_y, inner_h) =
-            ui::two_pane_geometry(cols, rows);
+            if app.sidebar_mode {
+                ui::sidebar_two_pane_geometry(app, cols, rows)
+            } else {
+                ui::two_pane_geometry(&app, cols, rows)
+            };
         if my >= inner_y && my < inner_y + inner_h {
             if mx >= left_x && mx < left_x + left_w {
                 return Some((Pane::Left, my - inner_y, mx - left_x));
@@ -957,10 +1224,11 @@ fn hit_test_pane(app: &App, mx: u16, my: u16, cols: u16, rows: u16) -> Option<(P
             }
         }
     } else {
-        let inner_x = 1u16;
-        let inner_y = 1u16;
-        let inner_w = cols.saturating_sub(2);
-        let inner_h = rows.saturating_sub(2);
+        let (inner_x, inner_y, inner_w, inner_h) = if app.sidebar_mode {
+            ui::sidebar_geometry(app, cols, rows)
+        } else {
+            (1u16, 1u16, cols.saturating_sub(2), rows.saturating_sub(2))
+        };
         if my >= inner_y && my < inner_y + inner_h && mx >= inner_x && mx < inner_x + inner_w {
             return Some((Pane::Left, my - inner_y, mx - inner_x));
         }
@@ -972,7 +1240,11 @@ fn hit_test_pane(app: &App, mx: u16, my: u16, cols: u16, rows: u16) -> Option<(P
 fn clamp_to_pane(pane: Pane, app: &App, mx: u16, my: u16, cols: u16, rows: u16) -> (u16, u16) {
     if app.pty_right.is_some() {
         let (left_x, left_w, right_x, right_w, inner_y, inner_h) =
-            ui::two_pane_geometry(cols, rows);
+            if app.sidebar_mode {
+                ui::sidebar_two_pane_geometry(app, cols, rows)
+            } else {
+                ui::two_pane_geometry(&app, cols, rows)
+            };
         let (px, pw) = match pane {
             Pane::Left => (left_x, left_w),
             Pane::Right => (right_x, right_w),
@@ -981,10 +1253,11 @@ fn clamp_to_pane(pane: Pane, app: &App, mx: u16, my: u16, cols: u16, rows: u16) 
         let col = mx.max(px).min(px + pw - 1) - px;
         (row, col)
     } else {
-        let inner_x = 1u16;
-        let inner_y = 1u16;
-        let inner_w = cols.saturating_sub(2);
-        let inner_h = rows.saturating_sub(2);
+        let (inner_x, inner_y, inner_w, inner_h) = if app.sidebar_mode {
+            ui::sidebar_geometry(app, cols, rows)
+        } else {
+            (1u16, 1u16, cols.saturating_sub(2), rows.saturating_sub(2))
+        };
         let row = my.max(inner_y).min(inner_y + inner_h - 1) - inner_y;
         let col = mx.max(inner_x).min(inner_x + inner_w - 1) - inner_x;
         (row, col)
@@ -994,14 +1267,23 @@ fn clamp_to_pane(pane: Pane, app: &App, mx: u16, my: u16, cols: u16, rows: u16) 
 /// Get inner dimensions (width, height) for a specific pane.
 fn pane_inner_size(pane: Pane, app: &App, cols: u16, rows: u16) -> (u16, u16) {
     if app.pty_right.is_some() {
-        let (_, left_w, _, right_w, _, inner_h) = ui::two_pane_geometry(cols, rows);
+        let (_, left_w, _, right_w, _, inner_h) = if app.sidebar_mode {
+            ui::sidebar_two_pane_geometry(app, cols, rows)
+        } else {
+            ui::two_pane_geometry(&app, cols, rows)
+        };
         let w = match pane {
             Pane::Left => left_w,
             Pane::Right => right_w,
         };
         (w, inner_h)
     } else {
-        (cols.saturating_sub(2), rows.saturating_sub(2))
+        let (_, _, inner_w, inner_h) = if app.sidebar_mode {
+            ui::sidebar_geometry(app, cols, rows)
+        } else {
+            (1u16, 1u16, cols.saturating_sub(2), rows.saturating_sub(2))
+        };
+        (inner_w, inner_h)
     }
 }
 
