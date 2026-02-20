@@ -1063,43 +1063,27 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 )))])
                 .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
             }
-            ListItem::TreeDir { name, prefix, .. } => {
-                let mut spans = Vec::new();
-                if !prefix.is_empty() {
-                    spans.push(Span::styled(
-                        prefix.clone(),
-                        Style::default().fg(TREE_GUIDE).bg(BASE_BG),
-                    ));
-                }
-                spans.push(Span::styled(
+            ListItem::TreeDir { name, .. } => {
+                Row::new(vec![Cell::from(Line::from(Span::styled(
                     format!("{name}/"),
                     Style::default()
                         .fg(SECTION_FG)
                         .bg(BASE_BG)
-                        .add_modifier(Modifier::DIM),
-                ));
-                Row::new(vec![Cell::from(Line::from(spans))])
-                    .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
+                        .add_modifier(Modifier::BOLD),
+                )))])
+                .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
             }
-            ListItem::TreeRepo { name, session, prefix, .. } => {
+            ListItem::TreeRepo { name, session, .. } => {
                 let has_session = session.is_some();
                 let name_fg = if has_session { GREEN } else { REPO_FG };
-                let avail = max_name_w.saturating_sub(prefix.chars().count());
+                let avail = max_name_w.saturating_sub(1);
                 let name_text = truncate(name, avail);
 
-                let mut spans = Vec::new();
-                if !prefix.is_empty() {
-                    spans.push(Span::styled(
-                        prefix.clone(),
-                        Style::default().fg(TREE_GUIDE).bg(BASE_BG),
-                    ));
-                }
-                spans.push(Span::styled(
-                    name_text,
-                    Style::default().fg(name_fg).bg(BASE_BG),
-                ));
-                Row::new(vec![Cell::from(Line::from(spans))])
-                    .style(Style::default().fg(FG).bg(BASE_BG))
+                Row::new(vec![Cell::from(Line::from(vec![
+                    Span::styled(" ", Style::default().fg(FG).bg(BASE_BG)),
+                    Span::styled(name_text, Style::default().fg(name_fg).bg(BASE_BG)),
+                ]))])
+                .style(Style::default().fg(FG).bg(BASE_BG))
             }
             ListItem::SessionItem(session) => {
                 let is_current = app.is_current_session(session);
@@ -1218,9 +1202,8 @@ fn draw_attached_in_area(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     if is_two_pane {
-        // Two-pane: split inner area 60% | 1-col separator | 40%
         let total_w = inner.width;
-        let left_w = (total_w.saturating_sub(1)) * 60 / 100;
+        let left_w = (total_w.saturating_sub(1)) * app.split_left_pct as u16 / 100;
         let right_w = total_w.saturating_sub(1).saturating_sub(left_w);
 
         let left_area = Rect::new(inner.x, inner.y, left_w, inner.height);
@@ -1349,7 +1332,7 @@ pub fn sidebar_geometry(app: &App, cols: u16, rows: u16) -> (u16, u16, u16, u16)
 /// Returns (left_x, left_w, right_x, right_w, inner_y, inner_h).
 pub fn sidebar_two_pane_geometry(app: &App, cols: u16, rows: u16) -> (u16, u16, u16, u16, u16, u16) {
     let (inner_x, inner_y, inner_w, inner_h) = sidebar_geometry(app, cols, rows);
-    let left_w = (inner_w.saturating_sub(1)) * 60 / 100;
+    let left_w = (inner_w.saturating_sub(1)) * app.split_left_pct as u16 / 100;
     let right_w = inner_w.saturating_sub(1).saturating_sub(left_w);
     let left_x = inner_x;
     let right_x = inner_x + left_w + 1;
@@ -1404,9 +1387,8 @@ fn draw_attached(f: &mut Frame, app: &App) {
     f.render_widget(block, box_area);
 
     if is_two_pane {
-        // Two-pane: split inner area 60% | 1-col separator | 40%
         let total_w = inner.width;
-        let left_w = (total_w.saturating_sub(1)) * 60 / 100;
+        let left_w = (total_w.saturating_sub(1)) * app.split_left_pct as u16 / 100;
         let right_w = total_w.saturating_sub(1).saturating_sub(left_w);
 
         let left_area = Rect::new(inner.x, inner.y, left_w, inner.height);
@@ -1521,13 +1503,13 @@ fn draw_attached(f: &mut Frame, app: &App) {
 
 /// Compute two-pane layout geometry for render_pty_direct calls.
 /// Returns (left_x, left_w, right_x, right_w, inner_y, inner_h)
-pub fn two_pane_geometry(cols: u16, rows: u16) -> (u16, u16, u16, u16, u16, u16) {
+pub fn two_pane_geometry(app: &App, cols: u16, rows: u16) -> (u16, u16, u16, u16, u16, u16) {
     let inner_x = 1u16;
     let inner_y = 1u16;
     let inner_w = cols.saturating_sub(2);
     let inner_h = rows.saturating_sub(2);
 
-    let left_w = (inner_w.saturating_sub(1)) * 60 / 100;
+    let left_w = (inner_w.saturating_sub(1)) * app.split_left_pct as u16 / 100;
     let right_w = inner_w.saturating_sub(1).saturating_sub(left_w);
     let left_x = inner_x;
     let right_x = inner_x + left_w + 1; // +1 for separator

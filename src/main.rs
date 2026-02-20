@@ -25,6 +25,12 @@ use ratatui::Terminal;
 
 use app::{Action, App, Mode, Pane, SidebarFocus};
 
+#[derive(Clone, Copy, PartialEq)]
+enum ResizeDrag {
+    Sidebar,
+    Split,
+}
+
 /// Poll stdin and PTY file descriptors simultaneously.
 /// Returns (stdin_ready, pty_ready) so the caller can drain PTY data
 /// immediately instead of waiting for the crossterm poll timeout.
@@ -189,6 +195,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Double-click tracking for sidebar
     let mut last_sidebar_click: Option<(Instant, usize)> = None; // (time, selected index)
 
+    // Active resize drag
+    let mut resize_drag: Option<ResizeDrag> = None;
+
     loop {
         // ── 1. Drain PTY output (fast — just memcpy + vt100 parse) ──
         if app.mode == Mode::Attached {
@@ -269,7 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if app.sidebar_mode {
                             ui::sidebar_two_pane_geometry(&app, cols, rows)
                         } else {
-                            ui::two_pane_geometry(cols, rows)
+                            ui::two_pane_geometry(&app, cols, rows)
                         };
 
                     if pty_needs_render {
@@ -620,6 +629,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     ui_needs_draw = true;
                                 }
                             }
+                            KeyCode::Char('o') => {
+                                app.toggle_opened_filter();
+                                ui_needs_draw = true;
+                            }
                             KeyCode::Char('p') => {
                                 app.toggle_pin();
                                 ui_needs_draw = true;
@@ -945,6 +958,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Event::Mouse(mouse) => {
+                    // ── Resize drag handling ────────────────────────────────
+                    let sw = app.sidebar_width(term_cols);
+
+                    // Compute split separator column (if two-pane)
+                    let split_sep_x: Option<u16> = if app.pty_right.is_some() {
+                        let (left_x, left_w, _, _, _, _) = if app.sidebar_mode {
+                            ui::sidebar_two_pane_geometry(&app, term_cols, term_rows)
+                        } else {
+                            ui::two_pane_geometry(&app, term_cols, term_rows)
+                        };
+                        Some(left_x + left_w)
+                    } else {
+                        None
+                    };
+
+                    // Detect resize zone: sidebar border (col sw-1 or sw) or split separator
+                    let on_sidebar_border = app.sidebar_mode
+                        && (mouse.column == sw.saturating_sub(1) || mouse.column == sw);
+                    let on_split_sep = split_sep_x.map_or(false, |sx| mouse.column == sx);
+
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) if on_sidebar_border => {
+                            resize_drag = Some(ResizeDrag::Sidebar);
+                            selection = None;
+                        }
+                        MouseEventKind::Down(MouseButton::Left) if on_split_sep => {
+                            resize_drag = Some(ResizeDrag::Split);
+                            selection = None;
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) if resize_drag == Some(ResizeDrag::Sidebar) => {
+                            // New sidebar width: right border lands on mouse.column
+                            let new_w = (mouse.column + 1).clamp(10, term_cols.saturating_sub(20));
+                            app.sidebar_width_user = Some(new_w);
+                            pty_needs_render = true;
+                            ui_needs_draw = true;
+                            prev_screen_left = None;
+                            prev_screen_right = None;
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) if resize_drag == Some(ResizeDrag::Split) => {
+                            // Recompute split pct from mouse position
+                            let (inner_x, _, inner_w, _) = if app.sidebar_mode {
+                                ui::sidebar_geometry(&app, term_cols, term_rows)
+                            } else {
+                                (1u16, 1u16, term_cols.saturating_sub(2), term_rows.saturating_sub(2))
+                            };
+                            let avail = inner_w.saturating_sub(1) as u32;
+                            if avail > 0 {
+                                let offset = mouse.column.saturating_sub(inner_x) as u32;
+                                let pct = (offset * 100 / avail).clamp(20, 80);
+                                app.split_left_pct = pct;
+                            }
+                            pty_needs_render = true;
+                            ui_needs_draw = true;
+                            prev_screen_left = None;
+                            prev_screen_right = None;
+                        }
+                        MouseEventKind::Up(MouseButton::Left) if resize_drag.is_some() => {
+                            // Resize PTY to match new layout on release
+                            if app.mode == Mode::Attached {
+                                app.resize_pty(term_rows, term_cols);
+                                pty_needs_render = true;
+                            }
+                            resize_drag = None;
+                        }
+                        _ => {
                     // Sidebar click handling — works in both Normal and Attached modes
                     let in_sidebar = app.sidebar_mode && mouse.column < app.sidebar_width(term_cols);
 
@@ -1090,6 +1168,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => {}
                         }
                     }
+                        } // end _ => { (resize fallthrough arm)
+                    }     // end outer match mouse.kind for resize
                 }
                 Event::Resize(cols, rows) => {
                     term_cols = cols;
@@ -1141,7 +1221,7 @@ fn hit_test_pane(app: &App, mx: u16, my: u16, cols: u16, rows: u16) -> Option<(P
             if app.sidebar_mode {
                 ui::sidebar_two_pane_geometry(app, cols, rows)
             } else {
-                ui::two_pane_geometry(cols, rows)
+                ui::two_pane_geometry(&app, cols, rows)
             };
         if my >= inner_y && my < inner_y + inner_h {
             if mx >= left_x && mx < left_x + left_w {
@@ -1171,7 +1251,7 @@ fn clamp_to_pane(pane: Pane, app: &App, mx: u16, my: u16, cols: u16, rows: u16) 
             if app.sidebar_mode {
                 ui::sidebar_two_pane_geometry(app, cols, rows)
             } else {
-                ui::two_pane_geometry(cols, rows)
+                ui::two_pane_geometry(&app, cols, rows)
             };
         let (px, pw) = match pane {
             Pane::Left => (left_x, left_w),
@@ -1198,7 +1278,7 @@ fn pane_inner_size(pane: Pane, app: &App, cols: u16, rows: u16) -> (u16, u16) {
         let (_, left_w, _, right_w, _, inner_h) = if app.sidebar_mode {
             ui::sidebar_two_pane_geometry(app, cols, rows)
         } else {
-            ui::two_pane_geometry(cols, rows)
+            ui::two_pane_geometry(&app, cols, rows)
         };
         let w = match pane {
             Pane::Left => left_w,

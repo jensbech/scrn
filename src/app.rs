@@ -89,6 +89,10 @@ pub struct App {
     pub sidebar_focus: SidebarFocus,
     /// Table scroll offset from last render, used for click-to-select.
     pub sidebar_table_offset: std::cell::Cell<usize>,
+    /// User-dragged sidebar width override (None = auto).
+    pub sidebar_width_user: Option<u16>,
+    /// Left pane percentage for dual-pane split (default 60).
+    pub split_left_pct: u32,
 }
 
 impl App {
@@ -126,6 +130,8 @@ impl App {
             sidebar_mode,
             sidebar_focus: SidebarFocus::List,
             sidebar_table_offset: std::cell::Cell::new(0),
+            sidebar_width_user: None,
+            split_left_pct: 60,
         }
     }
 
@@ -582,8 +588,7 @@ impl App {
             .map(|s| s.pid_name.clone());
 
         let (pty_rows, total_inner_cols) = self.pty_area(term_rows, term_cols);
-        // 60/40 split with 1-col separator
-        let left_cols = (total_inner_cols.saturating_sub(1)) * 60 / 100;
+        let left_cols = (total_inner_cols.saturating_sub(1)) * self.split_left_pct as u16 / 100;
         let right_cols = total_inner_cols.saturating_sub(1).saturating_sub(left_cols);
 
         let rc = crate::screen::ensure_screenrc();
@@ -640,6 +645,20 @@ impl App {
         self.active_pane = Pane::Left;
         self.record_opened(name);
         self.mode = Mode::Attached;
+
+        // Poll until screen registers the new session (socket creation takes a few ms)
+        let deadline = Instant::now() + Duration::from_millis(300);
+        loop {
+            if let Ok(sessions) = screen::list_sessions() {
+                if sessions.iter().any(|s| s.name == name) {
+                    self.all_sessions = sessions;
+                    break;
+                }
+            }
+            if Instant::now() >= deadline { break; }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        self.apply_search_filter();
     }
 
     pub fn attach_selected(&mut self, term_rows: u16, term_cols: u16) {
@@ -675,8 +694,20 @@ impl App {
                         Ok(pty) => {
                             self.pty_session = Some(pty);
                             self.record_opened(&name);
-                            self.attached_name = name;
+                            self.attached_name = name.clone();
                             self.mode = Mode::Attached;
+                            let deadline = Instant::now() + Duration::from_millis(300);
+                            loop {
+                                if let Ok(sessions) = screen::list_sessions() {
+                                    if sessions.iter().any(|s| s.name == name) {
+                                        self.all_sessions = sessions;
+                                        break;
+                                    }
+                                }
+                                if Instant::now() >= deadline { break; }
+                                std::thread::sleep(Duration::from_millis(25));
+                            }
+                            self.apply_search_filter();
                         }
                         Err(e) => {
                             self.set_status(format!("Error: {e}"));
@@ -747,8 +778,7 @@ impl App {
         let (pty_rows, total_inner_cols) = self.pty_area(term_rows, term_cols);
 
         if self.pty_right.is_some() {
-            // Two-pane mode: recalculate 60/40 split
-            let left_cols = (total_inner_cols.saturating_sub(1)) * 60 / 100;
+            let left_cols = (total_inner_cols.saturating_sub(1)) * self.split_left_pct as u16 / 100;
             let right_cols = total_inner_cols.saturating_sub(1).saturating_sub(left_cols);
 
             if let Some(ref mut pty) = self.pty_session {
@@ -916,10 +946,14 @@ impl App {
             .is_some_and(|current| *current == session.pid_name)
     }
 
-    /// Sidebar width: 20% of terminal, clamped to [20, 40].
+    /// Sidebar width: user override if set, otherwise 20% of terminal clamped to [20, 40].
     pub fn sidebar_width(&self, term_cols: u16) -> u16 {
-        let w = term_cols / 5;
-        w.clamp(20, 40)
+        if let Some(w) = self.sidebar_width_user {
+            w.clamp(10, term_cols.saturating_sub(20))
+        } else {
+            let w = term_cols / 5;
+            w.clamp(20, 40)
+        }
     }
 
     /// Effective PTY area when sidebar is active, subtracting sidebar + its border.
@@ -1031,21 +1065,24 @@ fn save_snapshot(name: &str, screen: &vt100::Screen) {
     let _ = std::fs::write(dir.join(name), text);
 }
 
-fn build_tree_prefix(guide_lines: &[bool], is_last: bool) -> String {
-    let mut prefix = String::new();
-    for &has_more in guide_lines {
-        if has_more {
-            prefix.push_str("\u{2502}  "); // │  (3 chars)
+
+/// Walk down a chain of single-child directory nodes, joining names with `/`.
+/// Returns the collapsed display name and the deepest node whose children should be rendered.
+/// E.g., proj/ → pers/ (only child) becomes ("proj/pers", &pers_node).
+fn compact_dir_chain<'a>(node: &'a TreeNode) -> (String, &'a TreeNode) {
+    let mut name = node.name.clone();
+    let mut current = node;
+    loop {
+        // Only compact when there is exactly one child and it is a directory
+        if current.children.len() == 1 && !current.children[0].is_repo {
+            current = &current.children[0];
+            name.push('/');
+            name.push_str(&current.name);
         } else {
-            prefix.push_str("   "); // 3 spaces
+            break;
         }
     }
-    if is_last {
-        prefix.push_str("\u{2514}\u{2500} "); // └─ (3 chars)
-    } else {
-        prefix.push_str("\u{251c}\u{2500} "); // ├─ (3 chars)
-    }
-    prefix
+    (name, current)
 }
 
 fn flatten_tree(
@@ -1057,18 +1094,25 @@ fn flatten_tree(
     selectable_indices: &mut Vec<usize>,
     guide_lines: &mut Vec<bool>,
 ) {
-    if !node.is_repo && depth == 0 {
-        display_items.push(ListItem::TreeDir {
-            name: node.name.clone(),
-            prefix: String::new(),
-        });
-    }
+    // At depth 0: decide how to render the root header.
+    // If the root has no direct repo children, skip a standalone root line and instead
+    // prefix each sub-directory with the root path (e.g. "proj/pers/" not "proj/" + "pers/").
+    let (iter_node, dir_prefix): (&TreeNode, String) = if !node.is_repo && depth == 0 {
+        let has_direct_repos = node.children.iter().any(|c| c.is_repo);
+        if has_direct_repos {
+            // Root has its own repos — show it as a compact header and iterate its leaf.
+            let (compact_name, leaf) = compact_dir_chain(node);
+            display_items.push(ListItem::TreeDir { name: compact_name, prefix: String::new() });
+            (leaf, String::new())
+        } else {
+            // Root has only sub-dirs — skip standalone root line, prefix children instead.
+            (node, format!("{}/", node.name))
+        }
+    } else {
+        (node, String::new())
+    };
 
-    let child_count = node.children.len();
-    for (i, child) in node.children.iter().enumerate() {
-        let is_last = i == child_count - 1;
-        let prefix = build_tree_prefix(guide_lines, is_last);
-
+    for child in iter_node.children.iter() {
         if child.is_repo {
             let session = session_map.get(child.name.as_str()).cloned().cloned();
             if let Some(ref s) = session {
@@ -1084,16 +1128,19 @@ fn flatten_tree(
                 name: child.name.clone(),
                 path: child.path.clone(),
                 session,
-                prefix,
+                prefix: " ".to_string(),
             });
             selectable_indices.push(idx);
         } else {
-            display_items.push(ListItem::TreeDir {
-                name: child.name.clone(),
-                prefix,
-            });
-            guide_lines.push(!is_last);
-            flatten_tree(child, depth + 1, session_map, merged, display_items, selectable_indices, guide_lines);
+            let (compact_name, leaf) = compact_dir_chain(child);
+            let full_name = if dir_prefix.is_empty() {
+                compact_name
+            } else {
+                format!("{}{}", dir_prefix, compact_name)
+            };
+            display_items.push(ListItem::TreeDir { name: full_name, prefix: String::new() });
+            guide_lines.push(false);
+            flatten_tree(leaf, depth + 1, session_map, merged, display_items, selectable_indices, guide_lines);
             guide_lines.pop();
         }
     }
@@ -1113,16 +1160,22 @@ fn flatten_filtered(
         if !tree_has_match(node, query) {
             return;
         }
-        if depth == 0 {
-            display_items.push(ListItem::TreeDir {
-                name: node.name.clone(),
-                prefix: String::new(),
-            });
-        }
     }
 
-    // Pre-filter visible children
-    let visible_children: Vec<&TreeNode> = node
+    let (source_node, dir_prefix): (&TreeNode, String) = if !node.is_repo && depth == 0 {
+        let has_direct_repos = node.children.iter().any(|c| c.is_repo && fuzzy_match(&c.name, query).is_some());
+        if has_direct_repos {
+            let (compact_name, leaf) = compact_dir_chain(node);
+            display_items.push(ListItem::TreeDir { name: compact_name, prefix: String::new() });
+            (leaf, String::new())
+        } else {
+            (node, format!("{}/", node.name))
+        }
+    } else {
+        (node, String::new())
+    };
+
+    let visible_children: Vec<&TreeNode> = source_node
         .children
         .iter()
         .filter(|child| {
@@ -1134,11 +1187,7 @@ fn flatten_filtered(
         })
         .collect();
 
-    let visible_count = visible_children.len();
-    for (i, child) in visible_children.iter().enumerate() {
-        let is_last = i == visible_count - 1;
-        let prefix = build_tree_prefix(guide_lines, is_last);
-
+    for child in visible_children.iter() {
         if child.is_repo {
             let session = session_map.get(child.name.as_str()).cloned().cloned();
             if let Some(ref s) = session {
@@ -1154,16 +1203,19 @@ fn flatten_filtered(
                 name: child.name.clone(),
                 path: child.path.clone(),
                 session,
-                prefix,
+                prefix: " ".to_string(),
             });
             selectable_indices.push(idx);
         } else {
-            display_items.push(ListItem::TreeDir {
-                name: child.name.clone(),
-                prefix,
-            });
-            guide_lines.push(!is_last);
-            flatten_filtered(child, depth + 1, query, session_map, merged, display_items, selectable_indices, guide_lines);
+            let (compact_name, leaf) = compact_dir_chain(child);
+            let full_name = if dir_prefix.is_empty() {
+                compact_name
+            } else {
+                format!("{}{}", dir_prefix, compact_name)
+            };
+            display_items.push(ListItem::TreeDir { name: full_name, prefix: String::new() });
+            guide_lines.push(false);
+            flatten_filtered(leaf, depth + 1, query, session_map, merged, display_items, selectable_indices, guide_lines);
             guide_lines.pop();
         }
     }
