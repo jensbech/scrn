@@ -1152,6 +1152,50 @@ fn push_cup(buf: &mut Vec<u8>, row: u16, col: u16) {
 /// Render PTY cell content directly to the terminal, bypassing ratatui.
 ///
 /// This function ONLY writes cell content — no cursor hide/show.
+/// Render plain-text history lines (from Screen's `hardcopy -h` dump).
+/// Used when the user scrolls past the vt100 parser's scrollback buffer.
+/// `offset` is the line index into `lines` for the top of the viewport.
+pub fn render_history_lines(
+    w: &mut impl Write,
+    lines: &[String],
+    offset: usize,
+    inner_x: u16,
+    inner_y: u16,
+    inner_w: u16,
+    inner_h: u16,
+) -> std::io::Result<()> {
+    let mut buf = Vec::with_capacity(inner_w as usize * inner_h as usize * 4);
+    let default_style = CellStyle::default_cell();
+    write_sgr(&mut buf, &default_style);
+
+    for row in 0..inner_h {
+        push_cup(&mut buf, inner_y + row + 1, inner_x + 1);
+        let line_idx = offset + row as usize;
+        let line = lines.get(line_idx).map(|s| s.as_str()).unwrap_or("");
+        let mut col = 0u16;
+        for ch in line.chars() {
+            if col >= inner_w {
+                break;
+            }
+            let mut tmp = [0u8; 4];
+            let s = ch.encode_utf8(&mut tmp);
+            buf.extend_from_slice(s.as_bytes());
+            col += 1;
+        }
+        // Fill remaining columns with spaces
+        while col < inner_w {
+            buf.push(b' ');
+            col += 1;
+        }
+    }
+
+    if !buf.is_empty() {
+        buf.extend_from_slice(b"\x1b[0m");
+        w.write_all(&buf)?;
+    }
+    Ok(())
+}
+
 /// Cursor visibility is managed by the caller at the frame level to
 /// avoid flicker from repeated hide/show cycles.
 ///
@@ -1461,7 +1505,7 @@ impl PaneSelection {
     }
 }
 
-/// Overlay selected cells with inverted colors.
+/// Overlay selected cells with a fixed highlight background.
 pub fn render_selection(
     w: &mut impl Write,
     screen: &vt100::Screen,
@@ -1493,7 +1537,9 @@ pub fn render_selection(
                     continue;
                 }
                 let mut style = CellStyle::from_vt(vt_cell);
-                style.inverse = !style.inverse;
+                // Fixed selection background (steel blue) — keeps original fg visible
+                style.bg = vt100::Color::Rgb(60, 70, 100);
+                style.inverse = false;
                 if prev_style.as_ref() != Some(&style) {
                     write_sgr(&mut buf, &style);
                     prev_style = Some(style);

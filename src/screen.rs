@@ -43,6 +43,8 @@ pub fn ensure_screenrc() -> String {
         content.push_str(&format!("source {}\n", user_rc.display()));
     }
     content.push_str("truecolor on\n");
+    // Large scrollback so hardcopy -h can dump full session history
+    content.push_str("defscrollback 10000\n");
     // Pass alternate screen sequences through to the client terminal so
     // scrn's vt100 parser correctly switches buffers when apps enter/exit
     // full-screen mode. Without this, screen handles altscreen internally
@@ -228,6 +230,36 @@ pub fn create_session(name: &str) -> Result<(), String> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("Failed to create session: {}", stderr.trim()))
+    }
+}
+
+/// Dump the full scrollback history of a Screen session to a temp file
+/// via `screen -S ... -X hardcopy -h`, then return the lines.
+/// Returns an empty Vec on any failure (best-effort).
+pub fn dump_scrollback(pid_name: &str) -> Vec<String> {
+    let tmp = std::env::temp_dir().join(format!("scrn_scrollback_{}", std::process::id()));
+    let tmp_str = tmp.to_string_lossy().to_string();
+
+    let _ = Command::new("screen")
+        .args(["-S", pid_name, "-X", "hardcopy", "-h", &tmp_str])
+        .output();
+
+    // Small delay — hardcopy is async in some screen versions
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let content = fs::read_to_string(&tmp).unwrap_or_default();
+    let _ = fs::remove_file(&tmp);
+
+    if content.is_empty() {
+        return Vec::new();
+    }
+
+    // Strip trailing blank lines (screen pads the visible area)
+    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let last_non_blank = lines.iter().rposition(|l| !l.trim().is_empty());
+    match last_non_blank {
+        Some(idx) => lines[..=idx].to_vec(),
+        None => Vec::new(),
     }
 }
 

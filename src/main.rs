@@ -267,61 +267,109 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             prev_screen_right = None;
                         }
                         // Render left pane
-                        let mut sb_total_left = 0usize;
+                        let sb_total_left;
                         if let Some(ref mut pty) = app.pty_session {
-                            if scroll_offset_left > 0 {
-                                pty.set_scrollback(usize::MAX);
-                                sb_total_left = pty.scrollback_offset();
-                                scroll_offset_left = scroll_offset_left.min(sb_total_left);
+                            // Get vt100 parser's scrollback capacity
+                            pty.set_scrollback(usize::MAX);
+                            let vt_sb_left = pty.scrollback_offset();
+                            pty.set_scrollback(0);
+                            let hist_len = app.screen_history_left.len();
+                            sb_total_left = vt_sb_left + hist_len;
+                            scroll_offset_left = scroll_offset_left.min(sb_total_left);
+
+                            if scroll_offset_left > vt_sb_left && hist_len > 0 {
+                                // Scrolled past vt100 buffer — render from screen history
+                                let extra = scroll_offset_left - vt_sb_left;
+                                let history_line = hist_len.saturating_sub(extra);
+                                ui::render_history_lines(
+                                    terminal.backend_mut(),
+                                    &app.screen_history_left,
+                                    history_line.saturating_sub(inner_h as usize),
+                                    left_x, inner_y, left_w, inner_h,
+                                )?;
+                                prev_screen_left = None;
+                            } else if scroll_offset_left > 0 {
                                 pty.set_scrollback(scroll_offset_left);
-                            }
-                            ui::render_pty_direct(
-                                terminal.backend_mut(),
-                                pty.screen(),
-                                if scroll_offset_left > 0 { None } else { prev_screen_left.as_ref() },
-                                left_x, inner_y, left_w, inner_h,
-                            )?;
-                            if let Some((Pane::Left, sel)) = &selection {
-                                ui::render_selection(terminal.backend_mut(), pty.screen(), sel, left_x, inner_y, left_w, inner_h)?;
+                                ui::render_pty_direct(
+                                    terminal.backend_mut(),
+                                    pty.screen(),
+                                    None,
+                                    left_x, inner_y, left_w, inner_h,
+                                )?;
+                                if let Some((Pane::Left, sel)) = &selection {
+                                    ui::render_selection(terminal.backend_mut(), pty.screen(), sel, left_x, inner_y, left_w, inner_h)?;
+                                }
+                                pty.set_scrollback(0);
+                                prev_screen_left = None;
+                            } else {
+                                ui::render_pty_direct(
+                                    terminal.backend_mut(),
+                                    pty.screen(),
+                                    prev_screen_left.as_ref(),
+                                    left_x, inner_y, left_w, inner_h,
+                                )?;
+                                if let Some((Pane::Left, sel)) = &selection {
+                                    ui::render_selection(terminal.backend_mut(), pty.screen(), sel, left_x, inner_y, left_w, inner_h)?;
+                                }
+                                prev_screen_left = Some(pty.screen().clone());
                             }
                             if scroll_offset_left > 0 {
                                 ui::render_scrollbar(
                                     terminal.backend_mut(), scroll_offset_left, sb_total_left,
                                     left_x, inner_y, left_w, inner_h,
                                 )?;
-                                pty.set_scrollback(0);
-                                prev_screen_left = None;
-                            } else {
-                                prev_screen_left = Some(pty.screen().clone());
                             }
                         }
                         // Render right pane
-                        let mut sb_total_right = 0usize;
+                        let sb_total_right;
                         if let Some(ref mut pty) = app.pty_right {
-                            if scroll_offset_right > 0 {
-                                pty.set_scrollback(usize::MAX);
-                                sb_total_right = pty.scrollback_offset();
-                                scroll_offset_right = scroll_offset_right.min(sb_total_right);
+                            pty.set_scrollback(usize::MAX);
+                            let vt_sb_right = pty.scrollback_offset();
+                            pty.set_scrollback(0);
+                            let hist_len = app.screen_history_right.len();
+                            sb_total_right = vt_sb_right + hist_len;
+                            scroll_offset_right = scroll_offset_right.min(sb_total_right);
+
+                            if scroll_offset_right > vt_sb_right && hist_len > 0 {
+                                let extra = scroll_offset_right - vt_sb_right;
+                                let history_line = hist_len.saturating_sub(extra);
+                                ui::render_history_lines(
+                                    terminal.backend_mut(),
+                                    &app.screen_history_right,
+                                    history_line.saturating_sub(inner_h as usize),
+                                    right_x, inner_y, right_w, inner_h,
+                                )?;
+                                prev_screen_right = None;
+                            } else if scroll_offset_right > 0 {
                                 pty.set_scrollback(scroll_offset_right);
-                            }
-                            ui::render_pty_direct(
-                                terminal.backend_mut(),
-                                pty.screen(),
-                                if scroll_offset_right > 0 { None } else { prev_screen_right.as_ref() },
-                                right_x, inner_y, right_w, inner_h,
-                            )?;
-                            if let Some((Pane::Right, sel)) = &selection {
-                                ui::render_selection(terminal.backend_mut(), pty.screen(), sel, right_x, inner_y, right_w, inner_h)?;
+                                ui::render_pty_direct(
+                                    terminal.backend_mut(),
+                                    pty.screen(),
+                                    None,
+                                    right_x, inner_y, right_w, inner_h,
+                                )?;
+                                if let Some((Pane::Right, sel)) = &selection {
+                                    ui::render_selection(terminal.backend_mut(), pty.screen(), sel, right_x, inner_y, right_w, inner_h)?;
+                                }
+                                pty.set_scrollback(0);
+                                prev_screen_right = None;
+                            } else {
+                                ui::render_pty_direct(
+                                    terminal.backend_mut(),
+                                    pty.screen(),
+                                    prev_screen_right.as_ref(),
+                                    right_x, inner_y, right_w, inner_h,
+                                )?;
+                                if let Some((Pane::Right, sel)) = &selection {
+                                    ui::render_selection(terminal.backend_mut(), pty.screen(), sel, right_x, inner_y, right_w, inner_h)?;
+                                }
+                                prev_screen_right = Some(pty.screen().clone());
                             }
                             if scroll_offset_right > 0 {
                                 ui::render_scrollbar(
                                     terminal.backend_mut(), scroll_offset_right, sb_total_right,
                                     right_x, inner_y, right_w, inner_h,
                                 )?;
-                                pty.set_scrollback(0);
-                                prev_screen_right = None;
-                            } else {
-                                prev_screen_right = Some(pty.screen().clone());
                             }
                         }
                     }
@@ -360,32 +408,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if selection.is_some() {
                             prev_screen_left = None;
                         }
-                        let mut sb_total = 0usize;
+                        let sb_total;
                         if let Some(ref mut pty) = app.pty_session {
-                            if scroll_offset_left > 0 {
-                                pty.set_scrollback(usize::MAX);
-                                sb_total = pty.scrollback_offset();
-                                scroll_offset_left = scroll_offset_left.min(sb_total);
+                            pty.set_scrollback(usize::MAX);
+                            let vt_sb = pty.scrollback_offset();
+                            pty.set_scrollback(0);
+                            let hist_len = app.screen_history_left.len();
+                            sb_total = vt_sb + hist_len;
+                            scroll_offset_left = scroll_offset_left.min(sb_total);
+
+                            if scroll_offset_left > vt_sb && hist_len > 0 {
+                                let extra = scroll_offset_left - vt_sb;
+                                let history_line = hist_len.saturating_sub(extra);
+                                ui::render_history_lines(
+                                    terminal.backend_mut(),
+                                    &app.screen_history_left,
+                                    history_line.saturating_sub(inner_h as usize),
+                                    inner_x, inner_y, inner_w, inner_h,
+                                )?;
+                                prev_screen_left = None;
+                            } else if scroll_offset_left > 0 {
                                 pty.set_scrollback(scroll_offset_left);
-                            }
-                            ui::render_pty_direct(
-                                terminal.backend_mut(),
-                                pty.screen(),
-                                if scroll_offset_left > 0 { None } else { prev_screen_left.as_ref() },
-                                inner_x, inner_y, inner_w, inner_h,
-                            )?;
-                            if let Some((_, sel)) = &selection {
-                                ui::render_selection(terminal.backend_mut(), pty.screen(), sel, inner_x, inner_y, inner_w, inner_h)?;
+                                ui::render_pty_direct(
+                                    terminal.backend_mut(),
+                                    pty.screen(),
+                                    None,
+                                    inner_x, inner_y, inner_w, inner_h,
+                                )?;
+                                if let Some((_, sel)) = &selection {
+                                    ui::render_selection(terminal.backend_mut(), pty.screen(), sel, inner_x, inner_y, inner_w, inner_h)?;
+                                }
+                                pty.set_scrollback(0);
+                                prev_screen_left = None;
+                            } else {
+                                ui::render_pty_direct(
+                                    terminal.backend_mut(),
+                                    pty.screen(),
+                                    prev_screen_left.as_ref(),
+                                    inner_x, inner_y, inner_w, inner_h,
+                                )?;
+                                if let Some((_, sel)) = &selection {
+                                    ui::render_selection(terminal.backend_mut(), pty.screen(), sel, inner_x, inner_y, inner_w, inner_h)?;
+                                }
+                                prev_screen_left = Some(pty.screen().clone());
                             }
                             if scroll_offset_left > 0 {
                                 ui::render_scrollbar(
                                     terminal.backend_mut(), scroll_offset_left, sb_total,
                                     inner_x, inner_y, inner_w, inner_h,
                                 )?;
-                                pty.set_scrollback(0);
-                                prev_screen_left = None;
-                            } else {
-                                prev_screen_left = Some(pty.screen().clone());
                             }
                         }
                     }
@@ -484,29 +555,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let is_ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
                         let mut handled = false;
                         if is_ctrl && matches!(key.code, KeyCode::Char('e') | KeyCode::Char('n')) {
-                            // Check if vt100 has scrollback content
-                            let active_pty = match app.active_pane {
-                                Pane::Left => app.pty_session.as_mut(),
-                                Pane::Right => app.pty_right.as_mut(),
+                            let in_alt_screen = match app.active_pane {
+                                Pane::Left => app.pty_session.as_ref().map_or(false, |p| p.alternate_screen()),
+                                Pane::Right => app.pty_right.as_ref().map_or(false, |p| p.alternate_screen()),
                             };
-                            let sb_available = active_pty
-                                .map(|p| p.scrollback_available())
-                                .unwrap_or(0);
 
-                            if sb_available > 0 {
-                                // Use scrn's scrollback viewer
-                                let offset = match app.active_pane {
-                                    Pane::Left => &mut scroll_offset_left,
-                                    Pane::Right => &mut scroll_offset_right,
-                                };
-                                match key.code {
-                                    KeyCode::Char('e') => { *offset += 3; }
-                                    KeyCode::Char('n') => { *offset = offset.saturating_sub(3); }
-                                    _ => {}
-                                }
-                                pty_needs_render = true;
-                            } else {
-                                // No scrollback — forward Page Up/Down to the inner app
+                            if in_alt_screen {
+                                // Full-screen app running — forward as Page Up/Down
                                 let active_pty = match app.active_pane {
                                     Pane::Left => app.pty_session.as_ref(),
                                     Pane::Right => app.pty_right.as_ref(),
@@ -518,6 +573,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     };
                                     pty.write_all(seq);
                                 }
+                            } else {
+                                // Normal screen — scroll scrn's scrollback by 1 line
+                                let offset = match app.active_pane {
+                                    Pane::Left => &mut scroll_offset_left,
+                                    Pane::Right => &mut scroll_offset_right,
+                                };
+                                match key.code {
+                                    KeyCode::Char('e') => { *offset += 1; }
+                                    KeyCode::Char('n') => { *offset = offset.saturating_sub(1); }
+                                    _ => {}
+                                }
+                                pty_needs_render = true;
                             }
                             handled = true;
                         }

@@ -71,6 +71,9 @@ pub struct App {
     pub display_items: Vec<ListItem>,
     pub selectable_indices: Vec<usize>,
     pub kill_session_info: Option<(String, String)>,
+    /// Pre-loaded Screen scrollback history (plain text, no colors)
+    pub screen_history_left: Vec<String>,
+    pub screen_history_right: Vec<String>,
     /// session name -> unix timestamp of last attach
     pub history: HashMap<String, u64>,
     pub filter_opened: bool,
@@ -105,6 +108,8 @@ impl App {
             display_items: Vec::new(),
             selectable_indices: Vec::new(),
             kill_session_info: None,
+            screen_history_left: Vec::new(),
+            screen_history_right: Vec::new(),
             history: load_history(),
             filter_opened: false,
             pins: load_pins(),
@@ -530,6 +535,7 @@ impl App {
         let pty_rows = term_rows.saturating_sub(2);
         let pty_cols = term_cols.saturating_sub(2);
         let rc = crate::screen::ensure_screenrc();
+        self.screen_history_left = crate::screen::dump_scrollback(pid_name);
         match PtySession::spawn("screen", &["-c", &rc, "-d", "-r", pid_name], pty_rows, pty_cols) {
             Ok(pty) => {
                 self.pty_session = Some(pty);
@@ -570,6 +576,14 @@ impl App {
         let right_cols = total_inner_cols.saturating_sub(1).saturating_sub(left_cols);
 
         let rc = crate::screen::ensure_screenrc();
+
+        // Dump scrollback for existing sessions before attaching
+        self.screen_history_left = left_pid.as_ref()
+            .map(|pid| crate::screen::dump_scrollback(pid))
+            .unwrap_or_default();
+        self.screen_history_right = right_pid.as_ref()
+            .map(|pid| crate::screen::dump_scrollback(pid))
+            .unwrap_or_default();
 
         // Spawn left PTY: create+attach for new sessions, reattach for existing
         let left_result = if let Some(ref pid) = left_pid {
@@ -700,6 +714,8 @@ impl App {
 
         self.pty_session = None;
         self.pty_right = None;
+        self.screen_history_left.clear();
+        self.screen_history_right.clear();
         self.attached_name.clear();
         self.attached_right_name.clear();
         self.active_pane = Pane::Left;
