@@ -1,6 +1,6 @@
 [package]
 name = "scrn"
-version = "2.22.1"
+version = "2.22.2"
 edition = "2021"
 authors = ["Jens Bech-Sørensen"]
 license = "MIT"

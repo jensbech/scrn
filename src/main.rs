@@ -983,6 +983,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // New sidebar width: right border lands on mouse.column
                             let new_w = (mouse.column + 1).clamp(10, term_cols.saturating_sub(20));
                             app.sidebar_width_user = Some(new_w);
+                            if app.mode == Mode::Attached {
+                                app.resize_pty(term_rows, term_cols);
+                            }
                             pty_needs_render = true;
                             ui_needs_draw = true;
                             prev_screen_left = None;
@@ -1000,6 +1003,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let offset = mouse.column.saturating_sub(inner_x) as u32;
                                 let pct = (offset * 100 / avail).clamp(20, 80);
                                 app.split_left_pct = pct;
+                            }
+                            if app.mode == Mode::Attached {
+                                app.resize_pty(term_rows, term_cols);
                             }
                             pty_needs_render = true;
                             ui_needs_draw = true;
