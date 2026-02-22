@@ -1,0 +1,34 @@
+# Ralph Progress Log
+# Auto-generated — 2026-02-21 08:12:50
+
+[2026-02-21 08:15] TASK-01 done: Fixed sessions killed on detach in workspace mode by separating session creation (screen -dmS) from attachment (screen -d -r) so PtySession::Drop only kills the client process, not the session server. Added ensure_session() helper, fixed attach_two_pane() and attach_selected() TreeRepo paths, and added post-detach status message confirming session is still alive.
+
+[2026-02-21 08:30] TASK-02 done: Hidden companion "-2" pane sessions from user-facing session list by adding ends_with("-2") filter in apply_search_filter(), preventing them from entering self.sessions and the session_map. Existing defense-in-depth filters in rebuild_display_list() (orphan collection and merged set insertions) and save_sessions() were already in place.
+
+[2026-02-21 08:45] TASK-03 done: Fixed Config::load to always read config file before applying CLI overrides. Removed early return when cli_workspace is present; now the config file is read first for all settings (including sidebar), then the CLI workspace arg overrides only the workspace field if provided.
+
+[2026-02-21 09:00] TASK-04 done: Fixed search in workspace mode not collapsing empty parent directories by adding search_compact_dir() which collapses single-visible-child dir chains based on the filtered tree (not the full tree). Replaced compact_dir_chain() calls in flatten_filtered() with search_compact_dir(), and added defensive pruning to remove TreeDir nodes when recursion adds no matching descendants.
+
+[2026-02-21 09:15] TASK-05 done: Capped scrollback history memory by adding MAX_SCROLLBACK_LINES constant (5000) in app.rs and a cap_scrollback() helper that drains oldest lines when exceeded. Applied truncation at all three dump_scrollback() assignment sites (attach_session single-pane and attach_two_pane left/right).
+
+[2026-02-21 09:30] TASK-06 done: Replaced all 5 unwrap() calls with safe alternatives. In app.rs, replaced 3 path.parent().unwrap() calls in save_pins(), save_history(), and save_sessions() with if-let-Some guards. In screen.rs, replaced find('.').unwrap() with a match that continues on None (also removing the redundant contains('.') check). In logging.rs, replaced path.parent().unwrap() in log_error() with an if-let-Some guard.
+
+[2026-02-21 09:45] TASK-07 done: Extracted keyboard input handling from the main event loop into 10 dedicated functions: handle_attached_sidebar_input(), handle_attached_input(), handle_normal_input(), handle_search_input(), handle_create_input(), handle_rename_input(), handle_confirm_kill_input(), handle_confirm_kill_all1_input(), handle_confirm_kill_all2_input(), and handle_confirm_quit_input(). Added RenderState struct to pass mutable rendering state to handlers that need it. All functions remain in main.rs as standalone functions called from the match arms.
+
+[2026-02-21 10:00] TASK-08 done: Extracted mouse event handling from main event loop into a dedicated handle_mouse_event() function in main.rs. The function consolidates all mouse handling logic (click, scroll, drag-resize for sidebar and split, text selection, double-click) and takes app, mouse event, terminal dimensions, resize_drag, last_sidebar_click, and RenderState as parameters. Replaced the inline Event::Mouse match arm with a call to this function.
+
+[2026-02-21 10:15] TASK-09 done: Persisted split pane ratio to disk at ~/.config/scrn/split_ratio. Added split_ratio_path(), load_split_ratio(), and save_split_ratio() in app.rs. App::new() loads the persisted value (clamped 20-80) on startup, defaulting to 60 if absent. The ratio is saved on mouse-up after a split drag in handle_mouse_event() in main.rs.
+
+[2026-02-21 10:30] TASK-10 done: Persisted sidebar width to disk at ~/.config/scrn/sidebar_width. Added sidebar_width_path(), load_sidebar_width(), and save_sidebar_width() in app.rs. App::new() loads the persisted value (clamped 10-200) on startup. The width is saved on mouse-up after a sidebar drag in handle_mouse_event() in main.rs.
+
+[2026-02-21 10:45] TASK-11 done: Added search result count to the sidebar search bar. The non-sidebar search bar already displayed "(N matches)" but the sidebar's compact search bar did not. Added a match count span showing "(N)" next to the search input in draw_sidebar(), using the existing COUNT_FG color. The count updates live as the user types since apply_search_filter() is called on every keystroke.
+
+[2026-02-21 11:00] TASK-12 done: Added visible loading indicator when refreshing sessions. Added refresh_pending flag to App so the "Refreshing sessions..." status is drawn before the actual refresh runs. When 'r' is pressed (Normal or Attached sidebar), status is set and refresh_pending=true; after the next render cycle draws the indicator, the pending refresh executes and shows "Sessions refreshed". On initial load, an early draw shows the loading status before refresh_sessions() and restore_sessions() run.
+
+[2026-02-21 11:15] TASK-13 done: Added configurable default split ratio in config.toml. Added split_ratio field (Option<u32>) to Config struct, parsed in Config::load() with 20-80 clamping. Updated App::new() to accept config_split_ratio parameter; persisted file value takes precedence, then config.toml value, then hardcoded default of 60. Users can set split_ratio = 50 in ~/.config/scrn/config.toml.
+
+[2026-02-21 11:30] TASK-14 done: Added session sort options with 's' keybinding in Normal mode and sidebar list mode. Cycles through Name/Recent/State sort modes. ByName sorts alphabetically, ByRecent sorts by last-opened timestamp (most recent first), ByState sorts attached-first then alphabetically. Current sort mode shown in status bar bottom border when not default (name). Sort mode persisted to ~/.config/scrn/sort_mode. Added 's' Sort entry to the legend.
+
+[2026-02-21 11:45] TASK-15 done: Implemented lazy session creation for workspace repos. Changed restore_sessions() to skip sessions with a workspace path so they are not pre-created on startup. Sessions are created on-demand via ensure_session() when the user presses Enter on a repo node. Updated UI styling in both draw_table() and draw_sidebar() to show repos without sessions in DIM color and repos with active sessions in GREEN. Removed unused REPO_FG constant.
+
+[2026-02-21 12:00] TASK-16 done: Added --version and -V CLI flags. Changed the existing -v flag to -V (uppercase) to match standard CLI conventions (cargo, rustc, etc.). Both --version and -V print "scrn <version>" using env!("CARGO_PKG_VERSION") and exit.

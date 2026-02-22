@@ -135,11 +135,10 @@ pub fn list_sessions() -> Result<Vec<Session>, String> {
         }
 
         let pid_name = parts[0].trim();
-        if !pid_name.contains('.') {
-            continue;
-        }
-
-        let dot_pos = pid_name.find('.').unwrap();
+        let dot_pos = match pid_name.find('.') {
+            Some(pos) => pos,
+            None => continue,
+        };
         let name = &pid_name[dot_pos + 1..];
 
         let rest = parts[1..].join("\t");

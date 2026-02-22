@@ -9,7 +9,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{fuzzy_match, App, ListItem, Mode, Pane, SidebarFocus};
+use crate::app::{fuzzy_match, App, ListItem, Mode, Pane, SidebarFocus, SortMode};
 use crate::screen::SessionState;
 
 // ── Palette — ALL explicit Rgb, zero ANSI named colors ─────
@@ -40,7 +40,6 @@ const DIM_BG: Color = Color::Rgb(10, 10, 15);
 const VERSION_FG: Color = Color::Rgb(80, 80, 100);
 const COUNT_FG: Color = Color::Rgb(100, 100, 120);
 const SECTION_FG: Color = Color::Rgb(140, 120, 180);
-const REPO_FG: Color = Color::Rgb(180, 180, 200);
 const SEPARATOR_FG: Color = Color::Rgb(60, 60, 80);
 const ACTIVE_PANE_BORDER: Color = Color::Rgb(120, 160, 255);
 const TREE_GUIDE: Color = Color::Rgb(55, 55, 75);
@@ -278,7 +277,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                 let avail = name_chars.saturating_sub(margin.len() + prefix.chars().count());
                 let name_text = truncate(name, avail);
                 let has_session = session.is_some();
-                let name_fg = if has_session { GREEN } else { REPO_FG };
+                let name_fg = if has_session { GREEN } else { DIM };
 
                 let name_cell = if !app.search_input.is_empty() {
                     if let Some((positions, _)) = fuzzy_match(name, &app.search_input) {
@@ -473,8 +472,14 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
             .right_aligned(),
         );
 
-    // Bottom border: status message and/or filter indicator
+    // Bottom border: status message, sort mode, and/or filter indicator
     let mut bottom_spans: Vec<Span> = Vec::new();
+    if app.sort_mode != SortMode::Name {
+        bottom_spans.push(Span::styled(
+            format!(" Sort: {} ", app.sort_mode.label()),
+            Style::default().fg(DIM).bg(BASE_BG),
+        ));
+    }
     if app.filter_opened {
         bottom_spans.push(Span::styled(
             " Showing: opened only ",
@@ -871,6 +876,7 @@ fn draw_legend(f: &mut Frame, app: &App) {
         ("X", "Kill all"),
         ("p", "Pin/Unpin"),
         ("/", "Search"),
+        ("s", "Sort"),
         ("o", "Toggle filter"),
         ("r", "Refresh"),
         ("j/k", "Navigate"),
@@ -1013,8 +1019,14 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             ),
         ]));
 
-    // Bottom border: status message
+    // Bottom border: sort mode and status message
     let mut bottom_spans: Vec<Span> = Vec::new();
+    if app.sort_mode != SortMode::Name {
+        bottom_spans.push(Span::styled(
+            format!(" {} ", app.sort_mode.label()),
+            Style::default().fg(DIM).bg(BASE_BG),
+        ));
+    }
     if !app.status_msg.is_empty() {
         let is_error = app.status_msg.starts_with("Error");
         let fg = if is_error { STATUS_ERR } else { STATUS_OK };
@@ -1075,7 +1087,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             }
             ListItem::TreeRepo { name, session, .. } => {
                 let has_session = session.is_some();
-                let name_fg = if has_session { GREEN } else { REPO_FG };
+                let name_fg = if has_session { GREEN } else { DIM };
                 let avail = max_name_w.saturating_sub(1);
                 let name_text = truncate(name, avail);
 
@@ -1135,10 +1147,12 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     // Draw search bar inside sidebar
     if let Some(search_area) = search_area {
         let cursor = if app.mode == Mode::Searching { "\u{2502}" } else { "" };
+        let match_count = format!(" ({})", app.selectable_indices.len());
         let line = Line::from(vec![
             Span::styled("/", Style::default().fg(MATCH_FG).bg(SEARCH_BG).add_modifier(Modifier::BOLD)),
             Span::styled(app.search_input.clone(), Style::default().fg(FG_BRIGHT).bg(SEARCH_BG)),
             Span::styled(cursor.to_string(), Style::default().fg(MATCH_FG).bg(SEARCH_BG)),
+            Span::styled(match_count, Style::default().fg(COUNT_FG).bg(SEARCH_BG)),
         ]);
         f.render_widget(
             Paragraph::new(line).style(Style::default().fg(FG).bg(SEARCH_BG)),

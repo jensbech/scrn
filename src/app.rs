@@ -6,6 +6,10 @@ use crate::pty::PtySession;
 use crate::screen::{self, Session};
 use crate::workspace::{self, TreeNode};
 
+/// Maximum number of scrollback history lines kept per pane.
+/// Older lines are discarded from the top when this limit is exceeded.
+const MAX_SCROLLBACK_LINES: usize = 5000;
+
 #[derive(PartialEq)]
 pub enum Mode {
     Normal,
@@ -28,6 +32,31 @@ pub enum Action {
 pub enum Pane {
     Left,
     Right,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+pub enum SortMode {
+    Name,
+    Recent,
+    State,
+}
+
+impl SortMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SortMode::Name => "name",
+            SortMode::Recent => "recent",
+            SortMode::State => "state",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            SortMode::Name => SortMode::Recent,
+            SortMode::Recent => SortMode::State,
+            SortMode::State => SortMode::Name,
+        }
+    }
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -93,10 +122,17 @@ pub struct App {
     pub sidebar_width_user: Option<u16>,
     /// Left pane percentage for dual-pane split (default 60).
     pub split_left_pct: u32,
+    /// When true, the next render cycle will trigger a session refresh.
+    /// This allows the "Refreshing sessions..." status to be drawn first.
+    pub refresh_pending: bool,
+    /// Current sort mode for session list ordering.
+    pub sort_mode: SortMode,
 }
 
 impl App {
-    pub fn new(action_file: Option<String>, workspace: Option<PathBuf>, sidebar_mode: bool) -> Self {
+    pub fn new(action_file: Option<String>, workspace: Option<PathBuf>, sidebar_mode: bool, config_split_ratio: Option<u32>) -> Self {
+        // Persisted split ratio (from drag) takes precedence, then config.toml value, then default 60
+        let default_split = config_split_ratio.unwrap_or(60);
         Self {
             sessions: Vec::new(),
             all_sessions: Vec::new(),
@@ -130,8 +166,19 @@ impl App {
             sidebar_mode,
             sidebar_focus: SidebarFocus::List,
             sidebar_table_offset: std::cell::Cell::new(0),
-            sidebar_width_user: None,
-            split_left_pct: 60,
+            sidebar_width_user: load_sidebar_width(),
+            split_left_pct: load_split_ratio().unwrap_or(default_split),
+            refresh_pending: false,
+            sort_mode: load_sort_mode(),
+        }
+    }
+
+    /// Truncate a scrollback history vector to at most `MAX_SCROLLBACK_LINES`,
+    /// discarding the oldest (top) lines.
+    fn cap_scrollback(hist: &mut Vec<String>) {
+        if hist.len() > MAX_SCROLLBACK_LINES {
+            let excess = hist.len() - MAX_SCROLLBACK_LINES;
+            hist.drain(..excess);
         }
     }
 
@@ -165,11 +212,12 @@ impl App {
             if live_names.contains(name) {
                 continue;
             }
-            let result = if let Some(dir) = path {
-                screen::create_session_in_dir(name, dir)
-            } else {
-                screen::create_session(name)
-            };
+            // Skip workspace repo sessions — they are created lazily when
+            // the user presses Enter on a repo node for the first time.
+            if path.is_some() {
+                continue;
+            }
+            let result = screen::create_session(name);
             match result {
                 Ok(()) => restored += 1,
                 Err(e) => crate::logging::log_error(&format!("Failed to restore session '{name}': {e}")),
@@ -253,6 +301,10 @@ impl App {
                 if s.name.starts_with("tty") || s.name.starts_with("pts") {
                     return false;
                 }
+                // Hide companion "-2" pane sessions from user-facing list
+                if s.name.ends_with("-2") {
+                    return false;
+                }
                 if self.search_input.is_empty() {
                     true
                 } else {
@@ -317,7 +369,7 @@ impl App {
             })
             .collect();
 
-        // Sort by fuzzy match score when searching
+        // Sort by fuzzy match score when searching, otherwise by sort mode
         if !self.search_input.is_empty() {
             orphan_sessions.sort_by(|a, b| {
                 let score_a = fuzzy_match(&a.name, &self.search_input)
@@ -328,6 +380,30 @@ impl App {
                     .unwrap_or(i32::MIN);
                 score_b.cmp(&score_a)
             });
+        } else {
+            let history = &self.history;
+            match self.sort_mode {
+                SortMode::Name => {
+                    orphan_sessions.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                }
+                SortMode::Recent => {
+                    orphan_sessions.sort_by(|a, b| {
+                        let ts_a = history.get(&a.name).copied().unwrap_or(0);
+                        let ts_b = history.get(&b.name).copied().unwrap_or(0);
+                        ts_b.cmp(&ts_a)
+                    });
+                }
+                SortMode::State => {
+                    orphan_sessions.sort_by(|a, b| {
+                        let state_ord = |s: &Session| match s.state {
+                            crate::screen::SessionState::Attached => 0,
+                            crate::screen::SessionState::Detached => 1,
+                        };
+                        state_ord(a).cmp(&state_ord(b))
+                            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                    });
+                }
+            }
         }
 
         // Build orphan items
@@ -554,6 +630,7 @@ impl App {
         let (pty_rows, pty_cols) = self.pty_area(term_rows, term_cols);
         let rc = crate::screen::ensure_screenrc();
         self.screen_history_left = crate::screen::dump_scrollback(pid_name);
+        Self::cap_scrollback(&mut self.screen_history_left);
         match PtySession::spawn("screen", &["-c", &rc, "-d", "-r", pid_name], pty_rows, pty_cols) {
             Ok(pty) => {
                 self.pty_session = Some(pty);
@@ -567,6 +644,47 @@ impl App {
         }
     }
 
+    /// Ensure a detached screen session exists with the given name, creating
+    /// it in `dir` if necessary.  Returns the `pid_name` (e.g. "12345.foo")
+    /// on success so the caller can reattach with `screen -d -r`.
+    fn ensure_session(
+        &mut self,
+        name: &str,
+        dir: &std::path::Path,
+    ) -> Result<String, String> {
+        // Already exists?
+        if let Some(pid) = self
+            .all_sessions
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.pid_name.clone())
+        {
+            return Ok(pid);
+        }
+
+        // Create in detached mode so the server is a separate process and
+        // our PTY child (the screen client) can exit cleanly on detach
+        // without killing the session.
+        screen::create_session_in_dir(name, dir)?;
+
+        // Poll until screen registers the new session (socket creation takes a few ms)
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            if let Ok(sessions) = screen::list_sessions() {
+                if let Some(s) = sessions.iter().find(|s| s.name == name) {
+                    let pid = s.pid_name.clone();
+                    self.all_sessions = sessions;
+                    return Ok(pid);
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Err(format!("Session '{name}' not found after creation"))
+    }
+
     fn attach_two_pane(
         &mut self,
         name: &str,
@@ -576,16 +694,23 @@ impl App {
     ) {
         let right_name = format!("{name}-2");
 
-        let left_pid = self
-            .all_sessions
-            .iter()
-            .find(|s| s.name == name)
-            .map(|s| s.pid_name.clone());
-        let right_pid = self
-            .all_sessions
-            .iter()
-            .find(|s| s.name == right_name)
-            .map(|s| s.pid_name.clone());
+        // Ensure both sessions exist (create in detached mode if needed).
+        // This avoids spawning the screen *server* as our PTY child, which
+        // would cause the Drop impl to kill the session on detach.
+        let left_pid = match self.ensure_session(name, path) {
+            Ok(pid) => pid,
+            Err(e) => {
+                self.set_status(format!("Failed to create left session: {e}"));
+                return;
+            }
+        };
+        let right_pid = match self.ensure_session(&right_name, path) {
+            Ok(pid) => pid,
+            Err(e) => {
+                self.set_status(format!("Failed to create right session: {e}"));
+                return;
+            }
+        };
 
         let (pty_rows, total_inner_cols) = self.pty_area(term_rows, term_cols);
         let left_cols = (total_inner_cols.saturating_sub(1)) * self.split_left_pct as u16 / 100;
@@ -594,19 +719,14 @@ impl App {
         let rc = crate::screen::ensure_screenrc();
 
         // Dump scrollback for existing sessions before attaching
-        self.screen_history_left = left_pid.as_ref()
-            .map(|pid| crate::screen::dump_scrollback(pid))
-            .unwrap_or_default();
-        self.screen_history_right = right_pid.as_ref()
-            .map(|pid| crate::screen::dump_scrollback(pid))
-            .unwrap_or_default();
+        self.screen_history_left = crate::screen::dump_scrollback(&left_pid);
+        Self::cap_scrollback(&mut self.screen_history_left);
+        self.screen_history_right = crate::screen::dump_scrollback(&right_pid);
+        Self::cap_scrollback(&mut self.screen_history_right);
 
-        // Spawn left PTY: create+attach for new sessions, reattach for existing
-        let left_result = if let Some(ref pid) = left_pid {
-            PtySession::spawn("screen", &["-c", &rc, "-d", "-r", pid], pty_rows, left_cols)
-        } else {
-            PtySession::spawn_in_dir("screen", &["-c", &rc, "-S", name], pty_rows, left_cols, path)
-        };
+        // Spawn left PTY: always reattach (session was created detached if new)
+        let left_result =
+            PtySession::spawn("screen", &["-c", &rc, "-d", "-r", &left_pid], pty_rows, left_cols);
         match left_result {
             Ok(pty) => {
                 self.pty_session = Some(pty);
@@ -618,17 +738,8 @@ impl App {
         }
 
         // Spawn right PTY
-        let right_result = if let Some(ref pid) = right_pid {
-            PtySession::spawn("screen", &["-c", &rc, "-d", "-r", pid], pty_rows, right_cols)
-        } else {
-            PtySession::spawn_in_dir(
-                "screen",
-                &["-c", &rc, "-S", &right_name],
-                pty_rows,
-                right_cols,
-                path,
-            )
-        };
+        let right_result =
+            PtySession::spawn("screen", &["-c", &rc, "-d", "-r", &right_pid], pty_rows, right_cols);
         match right_result {
             Ok(pty) => {
                 self.pty_right = Some(pty);
@@ -645,19 +756,6 @@ impl App {
         self.active_pane = Pane::Left;
         self.record_opened(name);
         self.mode = Mode::Attached;
-
-        // Poll until screen registers the new session (socket creation takes a few ms)
-        let deadline = Instant::now() + Duration::from_millis(300);
-        loop {
-            if let Ok(sessions) = screen::list_sessions() {
-                if sessions.iter().any(|s| s.name == name) {
-                    self.all_sessions = sessions;
-                    break;
-                }
-            }
-            if Instant::now() >= deadline { break; }
-            std::thread::sleep(Duration::from_millis(25));
-        }
         self.apply_search_filter();
     }
 
@@ -681,32 +779,28 @@ impl App {
                 } else if let Some(session) = session {
                     self.attach_session(&session.name, &session.pid_name, term_rows, term_cols);
                 } else {
-                    // Create + attach in one step so the shell starts at the correct PTY size
+                    // Create session in detached mode first, then attach via
+                    // client so the session survives detach.
+                    let pid_name = match self.ensure_session(&name, &path) {
+                        Ok(pid) => pid,
+                        Err(e) => {
+                            self.set_status(format!("Error: {e}"));
+                            return;
+                        }
+                    };
                     let (pty_rows, pty_cols) = self.pty_area(term_rows, term_cols);
                     let rc = crate::screen::ensure_screenrc();
-                    match PtySession::spawn_in_dir(
+                    match PtySession::spawn(
                         "screen",
-                        &["-c", &rc, "-S", &name],
+                        &["-c", &rc, "-d", "-r", &pid_name],
                         pty_rows,
                         pty_cols,
-                        &path,
                     ) {
                         Ok(pty) => {
                             self.pty_session = Some(pty);
                             self.record_opened(&name);
                             self.attached_name = name.clone();
                             self.mode = Mode::Attached;
-                            let deadline = Instant::now() + Duration::from_millis(300);
-                            loop {
-                                if let Ok(sessions) = screen::list_sessions() {
-                                    if sessions.iter().any(|s| s.name == name) {
-                                        self.all_sessions = sessions;
-                                        break;
-                                    }
-                                }
-                                if Instant::now() >= deadline { break; }
-                                std::thread::sleep(Duration::from_millis(25));
-                            }
                             self.apply_search_filter();
                         }
                         Err(e) => {
@@ -720,6 +814,9 @@ impl App {
     }
 
     pub fn detach_pty(&mut self) {
+        // Remember session name for the status message after detach
+        let detached_name = self.attached_name.clone();
+
         // Save snapshot before detaching (while vt100 screen is still accessible)
         if let Some(ref pty) = self.pty_session {
             if !self.attached_name.is_empty() {
@@ -763,6 +860,19 @@ impl App {
         self.sidebar_focus = SidebarFocus::List;
         self.mode = Mode::Normal;
         self.refresh_sessions();
+
+        // Confirm the session is still alive after detach
+        if !detached_name.is_empty() {
+            let still_alive = self
+                .all_sessions
+                .iter()
+                .any(|s| s.name == detached_name);
+            if still_alive {
+                self.set_status(format!("Detached from '{detached_name}' (session still running)"));
+            } else {
+                self.set_status(format!("Detached from '{detached_name}' (session ended)"));
+            }
+        }
     }
 
     pub fn swap_pane(&mut self) {
@@ -1021,6 +1131,13 @@ impl App {
         save_history(&self.history);
     }
 
+    pub fn cycle_sort_mode(&mut self) {
+        self.sort_mode = self.sort_mode.next();
+        save_sort_mode(self.sort_mode);
+        self.rebuild_display_list();
+        self.set_status(format!("Sort: {}", self.sort_mode.label()));
+    }
+
     /// Format the last-opened time for display, returning None if never opened.
     pub fn last_opened(&self, name: &str) -> Option<String> {
         let ts = *self.history.get(name)?;
@@ -1076,6 +1193,35 @@ fn compact_dir_chain<'a>(node: &'a TreeNode) -> (String, &'a TreeNode) {
         // Only compact when there is exactly one child and it is a directory
         if current.children.len() == 1 && !current.children[0].is_repo {
             current = &current.children[0];
+            name.push('/');
+            name.push_str(&current.name);
+        } else {
+            break;
+        }
+    }
+    (name, current)
+}
+
+/// Like `compact_dir_chain` but only considers children visible under the
+/// current search query.  This collapses parent directories that have only
+/// one matching child directory, so the filtered tree stays minimal.
+fn search_compact_dir<'a>(node: &'a TreeNode, query: &str) -> (String, &'a TreeNode) {
+    let mut name = node.name.clone();
+    let mut current = node;
+    loop {
+        let visible: Vec<&TreeNode> = current
+            .children
+            .iter()
+            .filter(|c| {
+                if c.is_repo {
+                    fuzzy_match(&c.name, query).is_some()
+                } else {
+                    tree_has_match(c, query)
+                }
+            })
+            .collect();
+        if visible.len() == 1 && !visible[0].is_repo {
+            current = visible[0];
             name.push('/');
             name.push_str(&current.name);
         } else {
@@ -1165,7 +1311,7 @@ fn flatten_filtered(
     let (source_node, dir_prefix): (&TreeNode, String) = if !node.is_repo && depth == 0 {
         let has_direct_repos = node.children.iter().any(|c| c.is_repo && fuzzy_match(&c.name, query).is_some());
         if has_direct_repos {
-            let (compact_name, leaf) = compact_dir_chain(node);
+            let (compact_name, leaf) = search_compact_dir(node, query);
             display_items.push(ListItem::TreeDir { name: compact_name, prefix: String::new() });
             (leaf, String::new())
         } else {
@@ -1207,16 +1353,21 @@ fn flatten_filtered(
             });
             selectable_indices.push(idx);
         } else {
-            let (compact_name, leaf) = compact_dir_chain(child);
+            let (compact_name, leaf) = search_compact_dir(child, query);
             let full_name = if dir_prefix.is_empty() {
                 compact_name
             } else {
                 format!("{}{}", dir_prefix, compact_name)
             };
+            let before_len = display_items.len();
             display_items.push(ListItem::TreeDir { name: full_name, prefix: String::new() });
             guide_lines.push(false);
             flatten_filtered(leaf, depth + 1, query, session_map, merged, display_items, selectable_indices, guide_lines);
             guide_lines.pop();
+            // Prune empty parent directory if no matching descendants were added
+            if display_items.len() == before_len + 1 {
+                display_items.pop();
+            }
         }
     }
 }
@@ -1233,6 +1384,79 @@ fn tree_has_match(node: &TreeNode, query: &str) -> bool {
         }
     }
     false
+}
+
+fn split_ratio_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("scrn")
+        .join("split_ratio")
+}
+
+fn load_split_ratio() -> Option<u32> {
+    let contents = std::fs::read_to_string(split_ratio_path()).ok()?;
+    let pct = contents.trim().parse::<u32>().ok()?;
+    if (20..=80).contains(&pct) { Some(pct) } else { None }
+}
+
+pub fn save_split_ratio(pct: u32) {
+    let path = split_ratio_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, format!("{pct}\n"));
+}
+
+fn sidebar_width_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("scrn")
+        .join("sidebar_width")
+}
+
+fn load_sidebar_width() -> Option<u16> {
+    let contents = std::fs::read_to_string(sidebar_width_path()).ok()?;
+    let w = contents.trim().parse::<u16>().ok()?;
+    if (10..=200).contains(&w) { Some(w) } else { None }
+}
+
+pub fn save_sidebar_width(width: u16) {
+    let path = sidebar_width_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, format!("{width}\n"));
+}
+
+fn sort_mode_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("scrn")
+        .join("sort_mode")
+}
+
+fn load_sort_mode() -> SortMode {
+    let contents = match std::fs::read_to_string(sort_mode_path()) {
+        Ok(c) => c,
+        Err(_) => return SortMode::Name,
+    };
+    match contents.trim() {
+        "name" => SortMode::Name,
+        "recent" => SortMode::Recent,
+        "state" => SortMode::State,
+        _ => SortMode::Name,
+    }
+}
+
+fn save_sort_mode(mode: SortMode) {
+    let path = sort_mode_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, format!("{}\n", mode.label()));
 }
 
 fn pins_path() -> PathBuf {
@@ -1258,7 +1482,9 @@ fn load_pins() -> HashSet<String> {
 
 fn save_pins(pins: &HashSet<String>) {
     let path = pins_path();
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let mut lines: Vec<&str> = pins.iter().map(|s| s.as_str()).collect();
     lines.sort();
     let _ = std::fs::write(&path, lines.join("\n") + "\n");
@@ -1299,7 +1525,9 @@ fn load_history() -> HashMap<String, u64> {
 
 fn save_history(history: &HashMap<String, u64>) {
     let path = history_path();
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let mut lines: Vec<String> = history
         .iter()
         .map(|(name, ts)| format!("{name}\t{ts}"))
@@ -1319,7 +1547,9 @@ fn collect_repo_paths(node: &TreeNode, map: &mut HashMap<String, PathBuf>) {
 
 fn save_sessions(all_sessions: &[Session], workspace_tree: &Option<TreeNode>) {
     let path = sessions_path();
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
 
     let mut repo_paths: HashMap<String, PathBuf> = HashMap::new();
     if let Some(ref tree) = workspace_tree {

@@ -17,6 +17,7 @@ impl PtySession {
         Self::spawn_inner(program, args, rows, cols, None)
     }
 
+    #[allow(dead_code)]
     pub fn spawn_in_dir(
         program: &str,
         args: &[&str],

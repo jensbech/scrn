@@ -52,7 +52,9 @@ fn utc_timestamp() -> String {
 
 pub fn log_error(msg: &str) {
     let path = log_path();
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "[{}] {}", utc_timestamp(), msg);
     }

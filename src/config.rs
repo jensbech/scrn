@@ -4,21 +4,16 @@ use std::path::PathBuf;
 pub struct Config {
     pub workspace: Option<PathBuf>,
     pub sidebar: bool,
+    /// Default split ratio (20-80) from config.toml; used when no persisted override exists.
+    pub split_ratio: Option<u32>,
 }
 
 impl Config {
     pub fn load(cli_workspace: Option<&str>) -> Self {
-        // CLI arg takes precedence for workspace
-        if let Some(ws) = cli_workspace {
-            return Self {
-                workspace: Some(expand_tilde(ws)),
-                sidebar: false,
-            };
-        }
-
-        // Try config file
+        // Always read config file first for all settings
         let mut workspace = None;
         let mut sidebar = false;
+        let mut split_ratio = None;
 
         if let Some(contents) = read_config_file() {
             for line in contents.lines() {
@@ -36,13 +31,26 @@ impl Config {
                         "sidebar" => {
                             sidebar = value == "true";
                         }
+                        // Default left/right split ratio (20-80) for two-pane mode.
+                        "split_ratio" => {
+                            if let Ok(pct) = value.parse::<u32>() {
+                                if (20..=80).contains(&pct) {
+                                    split_ratio = Some(pct);
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
         }
 
-        Self { workspace, sidebar }
+        // CLI arg takes precedence for workspace
+        if let Some(ws) = cli_workspace {
+            workspace = Some(expand_tilde(ws));
+        }
+
+        Self { workspace, sidebar, split_ratio }
     }
 }
 
