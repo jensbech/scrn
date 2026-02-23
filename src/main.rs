@@ -211,7 +211,6 @@ fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
                         KeyCode::Char('p') => app.toggle_pin(),
                         KeyCode::Char('C') => app.toggle_constant(),
                         KeyCode::Char('r') => app.refresh_sessions(),
-                        KeyCode::Char('?') => app.show_legend = !app.show_legend,
                         _ => {}
                     },
                     Mode::Searching => match key.code {

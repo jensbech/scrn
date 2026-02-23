@@ -155,9 +155,6 @@ pub fn draw(f: &mut Frame, app: &App) {
         _ => {}
     }
 
-    if app.show_legend {
-        draw_legend(f);
-    }
 }
 
 fn dim_background(f: &mut Frame) {
@@ -488,18 +485,32 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(VERSION_FG).bg(BASE_BG),
             ),
         ]))
-        .title(
-            Line::from(Span::styled(
-                " Legend (?) ",
-                Style::default().fg(HELP_FG).bg(BASE_BG),
-            ))
-                .right_aligned(),
-        );
+        ;
 
-    // Bottom border: status message and/or filter indicator
-    let mut bottom_spans: Vec<Span> = Vec::new();
+    // Bottom border: key hints, status message, and/or filter indicator
+    let mut bottom_left_spans: Vec<Span> = Vec::new();
+
+    let hints: &[(&str, &str)] = &[
+        ("Enter","Attach"), ("c","Create"), ("n","Rename"), ("x","Kill"), ("/","Search"), ("q","Quit"),
+    ];
+    for (i, (key, desc)) in hints.iter().enumerate() {
+        if i > 0 {
+            bottom_left_spans.push(Span::styled(" ", Style::default().fg(DIM).bg(BASE_BG)));
+        }
+        bottom_left_spans.push(Span::styled(
+            format!("{key}"),
+            Style::default().fg(ACCENT).bg(BASE_BG),
+        ));
+        bottom_left_spans.push(Span::styled(
+            format!(" {desc}"),
+            Style::default().fg(DIM).bg(BASE_BG),
+        ));
+    }
+    block = block.title_bottom(Line::from(bottom_left_spans));
+
+    let mut bottom_right_spans: Vec<Span> = Vec::new();
     if app.filter_opened {
-        bottom_spans.push(Span::styled(
+        bottom_right_spans.push(Span::styled(
             " Showing: opened only ",
             Style::default().fg(MATCH_FG).bg(BASE_BG),
         ));
@@ -507,16 +518,16 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     if !app.status_msg.is_empty() {
         let is_error = app.status_msg.starts_with("Error");
         let fg = if is_error { STATUS_ERR } else { STATUS_OK };
-        if !bottom_spans.is_empty() {
-            bottom_spans.push(Span::styled(" ", Style::default().bg(BASE_BG)));
+        if !bottom_right_spans.is_empty() {
+            bottom_right_spans.push(Span::styled(" ", Style::default().bg(BASE_BG)));
         }
-        bottom_spans.push(Span::styled(
+        bottom_right_spans.push(Span::styled(
             format!(" {} ", app.status_msg),
             Style::default().fg(fg).bg(BASE_BG),
         ));
     }
-    if !bottom_spans.is_empty() {
-        block = block.title_bottom(Line::from(bottom_spans));
+    if !bottom_right_spans.is_empty() {
+        block = block.title_bottom(Line::from(bottom_right_spans).right_aligned());
     }
 
     if app.selectable_indices.is_empty() {
@@ -881,68 +892,3 @@ fn draw_quit_modal(f: &mut Frame) {
     );
 }
 
-// ── Legend ───────────────────────────────────────────────────
-
-fn draw_legend(f: &mut Frame) {
-    let entries: Vec<(&str, &str)> = vec![
-        ("Enter", "Attach"),
-        ("c", "Create"),
-        ("n", "Rename"),
-        ("x", "Kill"),
-        ("X", "Kill all"),
-        ("p", "Pin/Unpin"),
-        ("C", "Constant"),
-        ("/", "Search"),
-        ("o", "Toggle filter"),
-        ("r", "Refresh"),
-        ("j/k", "Navigate"),
-        ("g/G", "Top/Bottom"),
-        ("?", "Close legend"),
-        ("q", "Quit"),
-    ];
-
-    let width: u16 = 22;
-    let height = entries.len() as u16 + 3;
-    let area = f.area();
-    let x = area.width.saturating_sub(width + 2);
-    let y = area.height.saturating_sub(height + 2);
-    let legend_area = Rect::new(x, y, width, height);
-
-    f.render_widget(Clear, legend_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
-        .style(Style::default().fg(FG).bg(MODAL_BG))
-        .title(Span::styled(
-            " Keys ",
-            Style::default()
-                .fg(MODAL_TITLE)
-                .bg(MODAL_BG)
-                .add_modifier(Modifier::BOLD),
-        ));
-
-    let inner = block.inner(legend_area);
-    f.render_widget(block, legend_area);
-
-    let lines: Vec<Line> = entries
-        .iter()
-        .map(|(key, desc)| {
-            Line::from(vec![
-                Span::styled(
-                    format!(" {key:>5}"),
-                    Style::default().fg(ACCENT).bg(MODAL_BG),
-                ),
-                Span::styled(
-                    format!("  {desc}"),
-                    Style::default().fg(MODAL_TITLE).bg(MODAL_BG),
-                ),
-            ])
-        })
-        .collect();
-
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
-        inner,
-    );
-}
