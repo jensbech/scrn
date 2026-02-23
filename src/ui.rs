@@ -491,7 +491,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     let mut bottom_left_spans: Vec<Span> = Vec::new();
 
     let hints: &[(&str, &str)] = &[
-        ("Enter","Attach"), ("c","Create"), ("n","Rename"), ("x","Kill"), ("/","Search"), ("q","Quit"),
+        ("Enter","Attach"), ("c","Create"), ("n","Rename"), ("x","Kill"), ("p","Pin"), ("C","Constant"), ("/","Search"), ("q","Quit"),
     ];
     for (i, (key, desc)) in hints.iter().enumerate() {
         if i > 0 {
