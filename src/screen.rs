@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::SystemTime;
 
 extern crate libc;
 
@@ -24,6 +25,34 @@ pub struct Session {
     pub name: String,
     pub pid_name: String,
     pub state: SessionState,
+    pub created: Option<u64>,
+}
+
+pub fn format_uptime(created: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let secs = now.saturating_sub(created);
+    let mins = secs / 60;
+    let hours = mins / 60;
+    let days = hours / 24;
+    let weeks = days / 7;
+    let months = days / 30;
+
+    if months > 0 {
+        format!("{}mo", months)
+    } else if weeks > 0 {
+        format!("{}w", weeks)
+    } else if days > 0 {
+        format!("{}d", days)
+    } else if hours > 0 {
+        format!("{}h", hours)
+    } else if mins > 0 {
+        format!("{}m", mins)
+    } else {
+        "< 1m".to_string()
+    }
 }
 
 /// Returns the path to scrn's managed screenrc, creating it if needed.
@@ -43,13 +72,14 @@ pub fn ensure_screenrc() -> String {
         content.push_str(&format!("source {}\n", user_rc.display()));
     }
     content.push_str("truecolor on\n");
-    // Large scrollback so hardcopy -h can dump full session history
     content.push_str("defscrollback 10000\n");
-    // Pass alternate screen sequences through to the client terminal so
-    // scrn's vt100 parser correctly switches buffers when apps enter/exit
-    // full-screen mode. Without this, screen handles altscreen internally
-    // and only sends diffs, leaving stale content in the parser.
+    // Pass alternate screen sequences through so full-screen apps
+    // render correctly in the native terminal.
     content.push_str("altscreen on\n");
+    // Disable flow control so Ctrl+S is not eaten by the terminal driver
+    content.push_str("defflow off\n");
+    // Ctrl+S detaches from screen, returning to the scrn picker
+    content.push_str("bindkey \"^S\" detach\n");
 
     let _ = fs::write(&path, &content);
     path.to_string_lossy().into_owned()
@@ -155,10 +185,20 @@ pub fn list_sessions() -> Result<Vec<Session>, String> {
             SessionState::Detached
         };
 
+        let created = std::env::var("HOME").ok().and_then(|home| {
+            let socket = PathBuf::from(&home).join(".screen").join(pid_name);
+            fs::metadata(&socket)
+                .ok()
+                .and_then(|m| m.created().ok())
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+        });
+
         sessions.push(Session {
             name: name.to_string(),
             pid_name: pid_name.to_string(),
             state,
+            created,
         });
     }
 
@@ -230,36 +270,6 @@ pub fn create_session(name: &str) -> Result<(), String> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("Failed to create session: {}", stderr.trim()))
-    }
-}
-
-/// Dump the full scrollback history of a Screen session to a temp file
-/// via `screen -S ... -X hardcopy -h`, then return the lines.
-/// Returns an empty Vec on any failure (best-effort).
-pub fn dump_scrollback(pid_name: &str) -> Vec<String> {
-    let tmp = std::env::temp_dir().join(format!("scrn_scrollback_{}", std::process::id()));
-    let tmp_str = tmp.to_string_lossy().to_string();
-
-    let _ = Command::new("screen")
-        .args(["-S", pid_name, "-X", "hardcopy", "-h", &tmp_str])
-        .output();
-
-    // Small delay — hardcopy is async in some screen versions
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let content = fs::read_to_string(&tmp).unwrap_or_default();
-    let _ = fs::remove_file(&tmp);
-
-    if content.is_empty() {
-        return Vec::new();
-    }
-
-    // Strip trailing blank lines (screen pads the visible area)
-    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-    let last_non_blank = lines.iter().rposition(|l| !l.trim().is_empty());
-    match last_non_blank {
-        Some(idx) => lines[..=idx].to_vec(),
-        None => Vec::new(),
     }
 }
 

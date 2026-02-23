@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::pty::PtySession;
 use crate::screen::{self, Session};
 use crate::workspace::{self, TreeNode};
 
@@ -16,29 +15,19 @@ pub enum Mode {
     ConfirmKillAll1,
     ConfirmKillAll2,
     ConfirmQuit,
-    Attached,
 }
 
 pub enum Action {
-    GoHome,
     None,
-}
-
-#[derive(PartialEq, Clone, Copy)]
-pub enum Pane {
-    Left,
-    Right,
-}
-
-#[derive(PartialEq, Clone, Copy)]
-pub enum SidebarFocus {
-    List,
-    Content,
+    Attach(String),                   // pid.name
+    Create(String, Option<PathBuf>),  // name, optional dir
+    Quit,
 }
 
 #[derive(Clone)]
 pub enum ListItem {
     SectionHeader(String),
+    Separator,
     SessionItem(Session),
     TreeDir {
         name: String,
@@ -63,40 +52,25 @@ pub struct App {
     pub status_msg: String,
     pub status_set_at: Instant,
     pub current_session: Option<String>,
-    pub action_file: Option<String>,
     pub action: Action,
     pub show_legend: bool,
-    pub pty_session: Option<PtySession>,
-    pub pty_right: Option<PtySession>,
-    pub active_pane: Pane,
-    pub attached_name: String,
-    pub attached_right_name: String,
     pub rename_pid_name: String,
     pub workspace_dir: Option<PathBuf>,
     pub workspace_tree: Option<TreeNode>,
     pub display_items: Vec<ListItem>,
     pub selectable_indices: Vec<usize>,
     pub kill_session_info: Option<(String, String)>,
-    /// Pre-loaded Screen scrollback history (plain text, no colors)
-    pub screen_history_left: Vec<String>,
-    pub screen_history_right: Vec<String>,
     /// session name -> unix timestamp of last attach
     pub history: HashMap<String, u64>,
     pub filter_opened: bool,
     /// pinned session/repo names — always shown at top
     pub pins: HashSet<String>,
-    pub sidebar_mode: bool,
-    pub sidebar_focus: SidebarFocus,
-    /// Table scroll offset from last render, used for click-to-select.
-    pub sidebar_table_offset: std::cell::Cell<usize>,
-    /// User-dragged sidebar width override (None = auto).
-    pub sidebar_width_user: Option<u16>,
-    /// Left pane percentage for dual-pane split (default 60).
-    pub split_left_pct: u32,
+    /// constant session/repo names — always shown above pinned
+    pub constants: HashSet<String>,
 }
 
 impl App {
-    pub fn new(action_file: Option<String>, workspace: Option<PathBuf>, sidebar_mode: bool) -> Self {
+    pub fn new(workspace: Option<PathBuf>) -> Self {
         Self {
             sessions: Vec::new(),
             all_sessions: Vec::new(),
@@ -108,30 +82,18 @@ impl App {
             status_msg: String::new(),
             status_set_at: Instant::now(),
             current_session: std::env::var("STY").ok(),
-            action_file,
             action: Action::None,
             show_legend: false,
-            pty_session: None,
-            pty_right: None,
-            active_pane: Pane::Left,
-            attached_name: String::new(),
-            attached_right_name: String::new(),
             rename_pid_name: String::new(),
             workspace_dir: workspace,
             workspace_tree: None,
             display_items: Vec::new(),
             selectable_indices: Vec::new(),
             kill_session_info: None,
-            screen_history_left: Vec::new(),
-            screen_history_right: Vec::new(),
             history: load_history(),
             filter_opened: false,
             pins: load_pins(),
-            sidebar_mode,
-            sidebar_focus: SidebarFocus::List,
-            sidebar_table_offset: std::cell::Cell::new(0),
-            sidebar_width_user: None,
-            split_left_pct: 60,
+            constants: load_constants(),
         }
     }
 
@@ -231,9 +193,34 @@ impl App {
             self.set_status(format!("Unpinned '{name}'"));
         } else {
             self.pins.insert(name.clone());
+            // Mutual exclusivity: remove from constants if present
+            if self.constants.remove(&name) {
+                save_constants(&self.constants);
+            }
             self.set_status(format!("Pinned '{name}'"));
         }
         save_pins(&self.pins);
+        self.rebuild_display_list();
+    }
+
+    pub fn toggle_constant(&mut self) {
+        let name = match self.selected_display_item() {
+            Some(ListItem::TreeRepo { name, .. }) => name.clone(),
+            Some(ListItem::SessionItem(session)) => session.name.clone(),
+            _ => return,
+        };
+        if self.constants.contains(&name) {
+            self.constants.remove(&name);
+            self.set_status(format!("Removed from constants '{name}'"));
+        } else {
+            self.constants.insert(name.clone());
+            // Mutual exclusivity: remove from pins if present
+            if self.pins.remove(&name) {
+                save_pins(&self.pins);
+            }
+            self.set_status(format!("Added to constants '{name}'"));
+        }
+        save_constants(&self.constants);
         self.rebuild_display_list();
     }
 
@@ -343,84 +330,142 @@ impl App {
             }
         }
 
-        // Extract pinned items from workspace and orphan groups
-        let pins = &self.pins;
-        let mut pinned_items: Vec<ListItem> = Vec::new();
+        // Helper: extract items matching a name set from ws_items and orphan_items
+        // Returns (extracted_items, extracted_selectable, ws_indices_to_remove, orphan_indices_to_remove)
+        fn extract_section(
+            name_set: &HashSet<String>,
+            ws_items: &[ListItem],
+            orphan_items: &[ListItem],
+        ) -> (Vec<ListItem>, Vec<usize>, HashSet<usize>, HashSet<usize>) {
+            let mut items: Vec<ListItem> = Vec::new();
+            let mut selectable: Vec<usize> = Vec::new();
+            let mut ws_remove: HashSet<usize> = HashSet::new();
+            let mut orphan_remove: HashSet<usize> = HashSet::new();
 
-        // Extract pinned TreeRepo items from ws_items (flatten prefix for pinned section)
-        let mut pinned_ws_indices: HashSet<usize> = HashSet::new();
-        for (i, item) in ws_items.iter().enumerate() {
-            if let ListItem::TreeRepo { name, .. } = item {
-                if pins.contains(name.as_str()) {
-                    pinned_ws_indices.insert(i);
-                    if let ListItem::TreeRepo { name, path, session, .. } = item {
-                        pinned_items.push(ListItem::TreeRepo {
-                            name: name.clone(),
-                            path: path.clone(),
-                            session: session.clone(),
-                            prefix: String::new(),
-                        });
+            // Find matching ws repos and track their TreeDir parents
+            let mut needed_dir_indices: HashSet<usize> = HashSet::new();
+            let mut last_dir_idx: Option<usize> = None;
+            for (i, item) in ws_items.iter().enumerate() {
+                match item {
+                    ListItem::TreeDir { .. } | ListItem::SectionHeader(_) => {
+                        last_dir_idx = Some(i);
+                    }
+                    ListItem::TreeRepo { name, .. } => {
+                        if name_set.contains(name.as_str()) {
+                            ws_remove.insert(i);
+                            if let Some(dir_idx) = last_dir_idx {
+                                needed_dir_indices.insert(dir_idx);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Build items preserving tree order (dirs + repos)
+            for (i, item) in ws_items.iter().enumerate() {
+                if needed_dir_indices.contains(&i) {
+                    items.push(item.clone());
+                } else if ws_remove.contains(&i) {
+                    selectable.push(items.len());
+                    items.push(item.clone());
+                }
+            }
+
+            // Extract matching SessionItems from orphan_items
+            for (i, item) in orphan_items.iter().enumerate() {
+                if let ListItem::SessionItem(session) = item {
+                    if name_set.contains(session.name.as_str()) {
+                        orphan_remove.insert(i);
+                        selectable.push(items.len());
+                        items.push(item.clone());
                     }
                 }
             }
+
+            (items, selectable, ws_remove, orphan_remove)
         }
 
-        // Extract pinned SessionItem items from orphan_items
-        let mut pinned_orphan_indices: HashSet<usize> = HashSet::new();
-        for (i, item) in orphan_items.iter().enumerate() {
-            if let ListItem::SessionItem(session) = item {
-                if pins.contains(session.name.as_str()) {
-                    pinned_orphan_indices.insert(i);
-                    pinned_items.push(item.clone());
+        // Helper: remove indices from a group
+        fn remove_indices(
+            items: &mut Vec<ListItem>,
+            selectable: &mut Vec<usize>,
+            remove_set: &HashSet<usize>,
+            old_items: Vec<ListItem>,
+            old_selectable: Vec<usize>,
+        ) {
+            let sel_set: HashSet<usize> = old_selectable.into_iter().collect();
+            for (i, item) in old_items.into_iter().enumerate() {
+                if remove_set.contains(&i) {
+                    continue;
                 }
+                let new_idx = items.len();
+                if sel_set.contains(&i) {
+                    selectable.push(new_idx);
+                }
+                items.push(item);
             }
         }
 
-        // Remove pinned items from their original groups
-        if !pinned_ws_indices.is_empty() {
+        // Extract constants section (highest priority, claimed first)
+        let constants = &self.constants;
+        let (const_items, const_selectable, const_ws_remove, const_orphan_remove) =
+            extract_section(constants, &ws_items, &orphan_items);
+
+        // Remove constant items from ws/orphan groups
+        if !const_ws_remove.is_empty() {
             let old_ws = std::mem::take(&mut ws_items);
             let old_sel = std::mem::take(&mut ws_selectable);
-            let sel_set: HashSet<usize> = old_sel.into_iter().collect();
-            for (i, item) in old_ws.into_iter().enumerate() {
-                if pinned_ws_indices.contains(&i) {
-                    continue;
-                }
-                let new_idx = ws_items.len();
-                if sel_set.contains(&i) {
-                    ws_selectable.push(new_idx);
-                }
-                ws_items.push(item);
-            }
+            remove_indices(&mut ws_items, &mut ws_selectable, &const_ws_remove, old_ws, old_sel);
         }
-        if !pinned_orphan_indices.is_empty() {
+        if !const_orphan_remove.is_empty() {
             let old_orphan = std::mem::take(&mut orphan_items);
             let old_sel = std::mem::take(&mut orphan_selectable);
-            let sel_set: HashSet<usize> = old_sel.into_iter().collect();
-            for (i, item) in old_orphan.into_iter().enumerate() {
-                if pinned_orphan_indices.contains(&i) {
-                    continue;
-                }
-                let new_idx = orphan_items.len();
-                if sel_set.contains(&i) {
-                    orphan_selectable.push(new_idx);
-                }
-                orphan_items.push(item);
-            }
+            remove_indices(&mut orphan_items, &mut orphan_selectable, &const_orphan_remove, old_orphan, old_sel);
         }
 
-        // Prune orphan section if all items were pinned (only header remains)
+        // Extract pinned section (excludes items already claimed by constants)
+        let pins = &self.pins;
+        let (pinned_items, pinned_selectable, pinned_ws_remove, pinned_orphan_remove) =
+            extract_section(pins, &ws_items, &orphan_items);
+
+        // Remove pinned items from ws/orphan groups
+        if !pinned_ws_remove.is_empty() {
+            let old_ws = std::mem::take(&mut ws_items);
+            let old_sel = std::mem::take(&mut ws_selectable);
+            remove_indices(&mut ws_items, &mut ws_selectable, &pinned_ws_remove, old_ws, old_sel);
+        }
+        if !pinned_orphan_remove.is_empty() {
+            let old_orphan = std::mem::take(&mut orphan_items);
+            let old_sel = std::mem::take(&mut orphan_selectable);
+            remove_indices(&mut orphan_items, &mut orphan_selectable, &pinned_orphan_remove, old_orphan, old_sel);
+        }
+
+        // Prune orphan section if all items were extracted (only header remains)
         if orphan_selectable.is_empty() {
             orphan_items.clear();
         }
 
-        // Append pinned section first
+        // Append constants section first
+        if !const_items.is_empty() {
+            self.display_items.push(ListItem::SectionHeader("Constants".to_string()));
+            let offset = self.display_items.len();
+            for idx in const_selectable {
+                self.selectable_indices.push(offset + idx);
+            }
+            self.display_items.extend(const_items);
+            self.display_items.push(ListItem::Separator);
+        }
+
+        // Append pinned section
         if !pinned_items.is_empty() {
             self.display_items.push(ListItem::SectionHeader("Pinned".to_string()));
-            for item in pinned_items {
-                let idx = self.display_items.len();
-                self.selectable_indices.push(idx);
-                self.display_items.push(item);
+            let offset = self.display_items.len();
+            for idx in pinned_selectable {
+                self.selectable_indices.push(offset + idx);
             }
+            self.display_items.extend(pinned_items);
+            self.display_items.push(ListItem::Separator);
         }
 
         // When searching, hoist the group with the best match score first
@@ -478,11 +523,8 @@ impl App {
                             filtered_items.push(item.clone());
                         }
                     }
-                    ListItem::TreeDir { .. } | ListItem::SectionHeader(_) => {
-                        // Keep dirs/headers only if selectable items follow;
-                        // we'll prune empty ones in a second pass
+                    ListItem::TreeDir { .. } | ListItem::SectionHeader(_) | ListItem::Separator => {
                         if self.selectable_indices.contains(&i) {
-                            // This shouldn't happen for dirs, but just in case
                             filtered_indices.push(filtered_items.len());
                         }
                         filtered_items.push(item.clone());
@@ -490,7 +532,6 @@ impl App {
                 }
             }
             // Prune trailing non-selectable items (empty dirs/headers)
-            // Walk backwards and remove any dir/header that has no selectable item after it
             let mut keep = vec![false; filtered_items.len()];
             let selectable_set: std::collections::HashSet<usize> =
                 filtered_indices.iter().copied().collect();
@@ -500,11 +541,7 @@ impl App {
                     seen_selectable = true;
                     keep[i] = true;
                 } else {
-                    // dir/header: keep only if a selectable follows
                     keep[i] = seen_selectable;
-                    if !seen_selectable {
-                        // Reset for next group
-                    }
                     if matches!(filtered_items[i], ListItem::SectionHeader(_)) {
                         seen_selectable = false;
                     }
@@ -529,13 +566,13 @@ impl App {
     }
 
     pub fn confirm_search(&mut self) {
-        self.mode = self.return_to_list_mode();
+        self.mode = Mode::Normal;
     }
 
     pub fn clear_search(&mut self) {
         self.search_input.clear();
         self.apply_search_filter();
-        self.mode = self.return_to_list_mode();
+        self.mode = Mode::Normal;
     }
 
     pub fn selected_display_item(&self) -> Option<&ListItem> {
@@ -544,263 +581,27 @@ impl App {
             .and_then(|&idx| self.display_items.get(idx))
     }
 
-    fn attach_session(&mut self, name: &str, pid_name: &str, term_rows: u16, term_cols: u16) {
-        if let Some(ref current) = self.current_session {
-            if *current == pid_name {
-                self.set_status("Already in this session".to_string());
-                return;
-            }
-        }
-        let (pty_rows, pty_cols) = self.pty_area(term_rows, term_cols);
-        let rc = crate::screen::ensure_screenrc();
-        self.screen_history_left = crate::screen::dump_scrollback(pid_name);
-        match PtySession::spawn("screen", &["-c", &rc, "-d", "-r", pid_name], pty_rows, pty_cols) {
-            Ok(pty) => {
-                self.pty_session = Some(pty);
-                self.attached_name = name.to_string();
-                self.record_opened(name);
-                self.mode = Mode::Attached;
-            }
-            Err(e) => {
-                self.set_status(format!("Failed to attach: {e}"));
-            }
-        }
-    }
-
-    fn attach_two_pane(
-        &mut self,
-        name: &str,
-        path: &std::path::Path,
-        term_rows: u16,
-        term_cols: u16,
-    ) {
-        let right_name = format!("{name}-2");
-
-        let left_pid = self
-            .all_sessions
-            .iter()
-            .find(|s| s.name == name)
-            .map(|s| s.pid_name.clone());
-        let right_pid = self
-            .all_sessions
-            .iter()
-            .find(|s| s.name == right_name)
-            .map(|s| s.pid_name.clone());
-
-        let (pty_rows, total_inner_cols) = self.pty_area(term_rows, term_cols);
-        let left_cols = (total_inner_cols.saturating_sub(1)) * self.split_left_pct as u16 / 100;
-        let right_cols = total_inner_cols.saturating_sub(1).saturating_sub(left_cols);
-
-        let rc = crate::screen::ensure_screenrc();
-
-        // Dump scrollback for existing sessions before attaching
-        self.screen_history_left = left_pid.as_ref()
-            .map(|pid| crate::screen::dump_scrollback(pid))
-            .unwrap_or_default();
-        self.screen_history_right = right_pid.as_ref()
-            .map(|pid| crate::screen::dump_scrollback(pid))
-            .unwrap_or_default();
-
-        // Spawn left PTY: create+attach for new sessions, reattach for existing
-        let left_result = if let Some(ref pid) = left_pid {
-            PtySession::spawn("screen", &["-c", &rc, "-d", "-r", pid], pty_rows, left_cols)
-        } else {
-            PtySession::spawn_in_dir("screen", &["-c", &rc, "-S", name], pty_rows, left_cols, path)
-        };
-        match left_result {
-            Ok(pty) => {
-                self.pty_session = Some(pty);
-            }
-            Err(e) => {
-                self.set_status(format!("Failed to attach left: {e}"));
-                return;
-            }
-        }
-
-        // Spawn right PTY
-        let right_result = if let Some(ref pid) = right_pid {
-            PtySession::spawn("screen", &["-c", &rc, "-d", "-r", pid], pty_rows, right_cols)
-        } else {
-            PtySession::spawn_in_dir(
-                "screen",
-                &["-c", &rc, "-S", &right_name],
-                pty_rows,
-                right_cols,
-                path,
-            )
-        };
-        match right_result {
-            Ok(pty) => {
-                self.pty_right = Some(pty);
-            }
-            Err(e) => {
-                self.pty_session = None; // clean up left
-                self.set_status(format!("Failed to attach right: {e}"));
-                return;
-            }
-        }
-
-        self.attached_name = name.to_string();
-        self.attached_right_name = right_name;
-        self.active_pane = Pane::Left;
-        self.record_opened(name);
-        self.mode = Mode::Attached;
-
-        // Poll until screen registers the new session (socket creation takes a few ms)
-        let deadline = Instant::now() + Duration::from_millis(300);
-        loop {
-            if let Ok(sessions) = screen::list_sessions() {
-                if sessions.iter().any(|s| s.name == name) {
-                    self.all_sessions = sessions;
-                    break;
-                }
-            }
-            if Instant::now() >= deadline { break; }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        self.apply_search_filter();
-    }
-
-    pub fn attach_selected(&mut self, term_rows: u16, term_cols: u16) {
+    /// Set the action to attach or create based on the currently selected item.
+    pub fn select_for_attach(&mut self) {
         let item = match self.selected_display_item() {
             Some(item) => item.clone(),
             None => return,
         };
         match item {
             ListItem::SessionItem(session) => {
-                let name = session.name.clone();
-                let pid_name = session.pid_name.clone();
-                self.attach_session(&name, &pid_name, term_rows, term_cols);
+                self.record_opened(&session.name);
+                self.action = Action::Attach(session.pid_name);
             }
-            ListItem::TreeRepo {
-                name, path, session, ..
-            } => {
-                if self.workspace_dir.is_some() {
-                    // Two-pane mode for workspace repos
-                    self.attach_two_pane(&name, &path, term_rows, term_cols);
-                } else if let Some(session) = session {
-                    self.attach_session(&session.name, &session.pid_name, term_rows, term_cols);
+            ListItem::TreeRepo { name, path, session, .. } => {
+                if let Some(session) = session {
+                    self.record_opened(&session.name);
+                    self.action = Action::Attach(session.pid_name);
                 } else {
-                    // Create + attach in one step so the shell starts at the correct PTY size
-                    let (pty_rows, pty_cols) = self.pty_area(term_rows, term_cols);
-                    let rc = crate::screen::ensure_screenrc();
-                    match PtySession::spawn_in_dir(
-                        "screen",
-                        &["-c", &rc, "-S", &name],
-                        pty_rows,
-                        pty_cols,
-                        &path,
-                    ) {
-                        Ok(pty) => {
-                            self.pty_session = Some(pty);
-                            self.record_opened(&name);
-                            self.attached_name = name.clone();
-                            self.mode = Mode::Attached;
-                            let deadline = Instant::now() + Duration::from_millis(300);
-                            loop {
-                                if let Ok(sessions) = screen::list_sessions() {
-                                    if sessions.iter().any(|s| s.name == name) {
-                                        self.all_sessions = sessions;
-                                        break;
-                                    }
-                                }
-                                if Instant::now() >= deadline { break; }
-                                std::thread::sleep(Duration::from_millis(25));
-                            }
-                            self.apply_search_filter();
-                        }
-                        Err(e) => {
-                            self.set_status(format!("Error: {e}"));
-                        }
-                    }
+                    self.record_opened(&name);
+                    self.action = Action::Create(name, Some(path));
                 }
             }
-            ListItem::SectionHeader(_) | ListItem::TreeDir { .. } => {}
-        }
-    }
-
-    pub fn detach_pty(&mut self) {
-        // Save snapshot before detaching (while vt100 screen is still accessible)
-        if let Some(ref pty) = self.pty_session {
-            if !self.attached_name.is_empty() {
-                save_snapshot(&self.attached_name, pty.screen());
-            }
-        }
-        if let Some(ref pty) = self.pty_right {
-            if !self.attached_right_name.is_empty() {
-                save_snapshot(&self.attached_right_name, pty.screen());
-            }
-        }
-
-        // Send Ctrl+A, d to cleanly detach screen sessions
-        if let Some(ref pty) = self.pty_session {
-            pty.write_all(b"\x01d");
-        }
-        if let Some(ref pty) = self.pty_right {
-            pty.write_all(b"\x01d");
-        }
-        // Wait for screen clients to exit cleanly (with timeout)
-        let deadline = Instant::now() + Duration::from_millis(50);
-        while Instant::now() < deadline {
-            let left_done = self
-                .pty_session
-                .as_mut()
-                .map_or(true, |p| !p.is_running());
-            let right_done = self.pty_right.as_mut().map_or(true, |p| !p.is_running());
-            if left_done && right_done {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-
-        self.pty_session = None;
-        self.pty_right = None;
-        self.screen_history_left.clear();
-        self.screen_history_right.clear();
-        self.attached_name.clear();
-        self.attached_right_name.clear();
-        self.active_pane = Pane::Left;
-        self.sidebar_focus = SidebarFocus::List;
-        self.mode = Mode::Normal;
-        self.refresh_sessions();
-    }
-
-    pub fn swap_pane(&mut self) {
-        if self.pty_right.is_some() {
-            self.active_pane = match self.active_pane {
-                Pane::Left => Pane::Right,
-                Pane::Right => Pane::Left,
-            };
-        }
-    }
-
-    pub fn resize_pty(&mut self, term_rows: u16, term_cols: u16) {
-        let (pty_rows, total_inner_cols) = self.pty_area(term_rows, term_cols);
-
-        if self.pty_right.is_some() {
-            let left_cols = (total_inner_cols.saturating_sub(1)) * self.split_left_pct as u16 / 100;
-            let right_cols = total_inner_cols.saturating_sub(1).saturating_sub(left_cols);
-
-            if let Some(ref mut pty) = self.pty_session {
-                pty.resize(pty_rows, left_cols);
-            }
-            if let Some(ref mut pty) = self.pty_right {
-                pty.resize(pty_rows, right_cols);
-            }
-        } else {
-            // Single pane
-            if let Some(ref mut pty) = self.pty_session {
-                pty.resize(pty_rows, total_inner_cols);
-            }
-        }
-    }
-
-    /// Return to the appropriate mode: Attached if PTY is alive (sidebar), Normal otherwise.
-    fn return_to_list_mode(&self) -> Mode {
-        if self.pty_session.is_some() {
-            Mode::Attached
-        } else {
-            Mode::Normal
+            ListItem::SectionHeader(_) | ListItem::TreeDir { .. } | ListItem::Separator => {}
         }
     }
 
@@ -813,7 +614,7 @@ impl App {
     pub fn confirm_create(&mut self) {
         let name = self.create_input.trim().to_string();
         if name.is_empty() {
-            self.mode = self.return_to_list_mode();
+            self.mode = Mode::Normal;
             return;
         }
         match screen::create_session(&name) {
@@ -825,11 +626,11 @@ impl App {
                 self.set_status(format!("Error: {e}"));
             }
         }
-        self.mode = self.return_to_list_mode();
+        self.mode = Mode::Normal;
     }
 
     pub fn cancel_create(&mut self) {
-        self.mode = self.return_to_list_mode();
+        self.mode = Mode::Normal;
     }
 
     pub fn start_rename(&mut self) {
@@ -844,7 +645,7 @@ impl App {
     pub fn confirm_rename(&mut self) {
         let new_name = self.create_input.trim().to_string();
         if new_name.is_empty() {
-            self.mode = self.return_to_list_mode();
+            self.mode = Mode::Normal;
             return;
         }
         match screen::rename_session(&self.rename_pid_name, &new_name) {
@@ -856,11 +657,11 @@ impl App {
                 self.set_status(format!("Error: {e}"));
             }
         }
-        self.mode = self.return_to_list_mode();
+        self.mode = Mode::Normal;
     }
 
     pub fn cancel_rename(&mut self) {
-        self.mode = self.return_to_list_mode();
+        self.mode = Mode::Normal;
     }
 
     pub fn start_kill(&mut self) {
@@ -891,12 +692,12 @@ impl App {
                 }
             }
         }
-        self.mode = self.return_to_list_mode();
+        self.mode = Mode::Normal;
     }
 
     pub fn cancel_kill(&mut self) {
         self.kill_session_info = None;
-        self.mode = self.return_to_list_mode();
+        self.mode = Mode::Normal;
     }
 
     pub fn start_kill_all(&mut self) {
@@ -927,89 +728,17 @@ impl App {
             self.set_status(format!("Killed {killed}, {} errors", errors.len()));
         }
         self.refresh_sessions();
-        self.mode = self.return_to_list_mode();
+        self.mode = Mode::Normal;
     }
 
     pub fn cancel_kill_all(&mut self) {
-        self.mode = self.return_to_list_mode();
-    }
-
-    pub fn go_home(&mut self) {
-        if self.current_session.is_some() {
-            self.action = Action::GoHome;
-        }
+        self.mode = Mode::Normal;
     }
 
     pub fn is_current_session(&self, session: &Session) -> bool {
         self.current_session
             .as_ref()
             .is_some_and(|current| *current == session.pid_name)
-    }
-
-    /// Sidebar width: user override if set, otherwise 20% of terminal clamped to [20, 40].
-    pub fn sidebar_width(&self, term_cols: u16) -> u16 {
-        if let Some(w) = self.sidebar_width_user {
-            w.clamp(10, term_cols.saturating_sub(20))
-        } else {
-            let w = term_cols / 5;
-            w.clamp(20, 40)
-        }
-    }
-
-    /// Effective PTY area when sidebar is active, subtracting sidebar + its border.
-    /// Returns (effective_rows, effective_cols).
-    pub fn pty_area(&self, term_rows: u16, term_cols: u16) -> (u16, u16) {
-        if self.sidebar_mode {
-            let sw = self.sidebar_width(term_cols);
-            // sidebar takes sw cols (including its right border), content area gets the rest
-            // content area has its own 1-col border on right, 1 row top + 1 row bottom
-            let content_cols = term_cols.saturating_sub(sw);
-            let pty_cols = content_cols.saturating_sub(2); // left border + right border of content box
-            let pty_rows = term_rows.saturating_sub(2);
-            (pty_rows, pty_cols)
-        } else {
-            (term_rows.saturating_sub(2), term_cols.saturating_sub(2))
-        }
-    }
-
-    /// Switch to a different session in sidebar mode: detach current, attach selected.
-    pub fn sidebar_switch_session(&mut self, term_rows: u16, term_cols: u16) {
-        // Detach current PTY without leaving Attached mode
-        if let Some(ref pty) = self.pty_session {
-            if !self.attached_name.is_empty() {
-                save_snapshot(&self.attached_name, pty.screen());
-            }
-            pty.write_all(b"\x01d");
-        }
-        if let Some(ref pty) = self.pty_right {
-            if !self.attached_right_name.is_empty() {
-                save_snapshot(&self.attached_right_name, pty.screen());
-            }
-            pty.write_all(b"\x01d");
-        }
-        // Wait briefly for clean detach
-        let deadline = Instant::now() + Duration::from_millis(50);
-        while Instant::now() < deadline {
-            let left_done = self.pty_session.as_mut().map_or(true, |p| !p.is_running());
-            let right_done = self.pty_right.as_mut().map_or(true, |p| !p.is_running());
-            if left_done && right_done { break; }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        self.pty_session = None;
-        self.pty_right = None;
-        self.screen_history_left.clear();
-        self.screen_history_right.clear();
-        self.attached_name.clear();
-        self.attached_right_name.clear();
-        self.active_pane = Pane::Left;
-        self.mode = Mode::Normal;
-        self.refresh_sessions();
-
-        // Now attach the selected session
-        self.attach_selected(term_rows, term_cols);
-        if self.mode == Mode::Attached {
-            self.sidebar_focus = SidebarFocus::Content;
-        }
     }
 
     fn record_opened(&mut self, name: &str) {
@@ -1033,47 +762,12 @@ impl App {
 
 }
 
-fn snapshot_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".config")
-        .join("scrn")
-        .join("snapshots")
-}
-
-fn save_snapshot(name: &str, screen: &vt100::Screen) {
-    let dir = snapshot_dir();
-    let _ = std::fs::create_dir_all(&dir);
-
-    let (rows, cols) = screen.size();
-    let mut text = String::new();
-    for row in 0..rows {
-        let mut line = String::new();
-        for col in 0..cols {
-            if let Some(cell) = screen.cell(row, col) {
-                let c = cell.contents();
-                if c.is_empty() {
-                    line.push(' ');
-                } else {
-                    line.push_str(&c);
-                }
-            }
-        }
-        text.push_str(line.trim_end());
-        text.push('\n');
-    }
-    let _ = std::fs::write(dir.join(name), text);
-}
-
-
 /// Walk down a chain of single-child directory nodes, joining names with `/`.
 /// Returns the collapsed display name and the deepest node whose children should be rendered.
-/// E.g., proj/ → pers/ (only child) becomes ("proj/pers", &pers_node).
 fn compact_dir_chain<'a>(node: &'a TreeNode) -> (String, &'a TreeNode) {
     let mut name = node.name.clone();
     let mut current = node;
     loop {
-        // Only compact when there is exactly one child and it is a directory
         if current.children.len() == 1 && !current.children[0].is_repo {
             current = &current.children[0];
             name.push('/');
@@ -1094,18 +788,13 @@ fn flatten_tree(
     selectable_indices: &mut Vec<usize>,
     guide_lines: &mut Vec<bool>,
 ) {
-    // At depth 0: decide how to render the root header.
-    // If the root has no direct repo children, skip a standalone root line and instead
-    // prefix each sub-directory with the root path (e.g. "proj/pers/" not "proj/" + "pers/").
     let (iter_node, dir_prefix): (&TreeNode, String) = if !node.is_repo && depth == 0 {
         let has_direct_repos = node.children.iter().any(|c| c.is_repo);
         if has_direct_repos {
-            // Root has its own repos — show it as a compact header and iterate its leaf.
             let (compact_name, leaf) = compact_dir_chain(node);
             display_items.push(ListItem::TreeDir { name: compact_name, prefix: String::new() });
             (leaf, String::new())
         } else {
-            // Root has only sub-dirs — skip standalone root line, prefix children instead.
             (node, format!("{}/", node.name))
         }
     } else {
@@ -1260,6 +949,35 @@ fn save_pins(pins: &HashSet<String>) {
     let path = pins_path();
     let _ = std::fs::create_dir_all(path.parent().unwrap());
     let mut lines: Vec<&str> = pins.iter().map(|s| s.as_str()).collect();
+    lines.sort();
+    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+}
+
+fn constants_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("scrn")
+        .join("constants")
+}
+
+fn load_constants() -> HashSet<String> {
+    let path = constants_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashSet::new(),
+    };
+    contents
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
+}
+
+fn save_constants(constants: &HashSet<String>) {
+    let path = constants_path();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let mut lines: Vec<&str> = constants.iter().map(|s| s.as_str()).collect();
     lines.sort();
     let _ = std::fs::write(&path, lines.join("\n") + "\n");
 }
