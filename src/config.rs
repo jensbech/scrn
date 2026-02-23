@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 pub struct Config {
     pub workspace: Option<PathBuf>,
-    pub sidebar: bool,
 }
 
 impl Config {
@@ -12,13 +11,11 @@ impl Config {
         if let Some(ws) = cli_workspace {
             return Self {
                 workspace: Some(expand_tilde(ws)),
-                sidebar: false,
             };
         }
 
         // Try config file
         let mut workspace = None;
-        let mut sidebar = false;
 
         if let Some(contents) = read_config_file() {
             for line in contents.lines() {
@@ -33,16 +30,13 @@ impl Config {
                         "workspace" if !value.is_empty() => {
                             workspace = Some(expand_tilde(value));
                         }
-                        "sidebar" => {
-                            sidebar = value == "true";
-                        }
                         _ => {}
                     }
                 }
             }
         }
 
-        Self { workspace, sidebar }
+        Self { workspace }
     }
 }
 
