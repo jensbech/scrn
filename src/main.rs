@@ -148,6 +148,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    app.kill_all_throwaway();
+
     Ok(())
 }
 
@@ -208,9 +210,10 @@ fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
                         KeyCode::Char('x') => app.start_kill(),
                         KeyCode::Char('X') => app.start_kill_all(),
                         KeyCode::Char('/') => app.start_search(),
-                        KeyCode::Char('p') => app.toggle_pin(),
+                        KeyCode::Char('p') => app.start_pin_confirm(),
                         KeyCode::Char('C') => app.toggle_constant(),
                         KeyCode::Char('r') => app.refresh_sessions(),
+                        KeyCode::Char('t') => app.create_throwaway(),
                         _ => {}
                     },
                     Mode::Searching => match key.code {
@@ -270,9 +273,14 @@ fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
                         }
                         _ => {}
                     },
+                    Mode::ConfirmPin => match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => app.confirm_pin(),
+                        KeyCode::Char('n') | KeyCode::Esc => app.cancel_pin(),
+                        _ => {}
+                    },
                     Mode::ConfirmKill => match key.code {
-                        KeyCode::Char('y') | KeyCode::Enter => app.confirm_kill(),
-                        KeyCode::Char('n') | KeyCode::Esc => app.cancel_kill(),
+                        KeyCode::Char('x') => app.confirm_kill(),
+                        KeyCode::Esc => app.cancel_kill(),
                         _ => {}
                     },
                     Mode::ConfirmKillAll1 => match key.code {

@@ -39,6 +39,10 @@ const PROC_FG: Color = Color::Rgb(160, 190, 140);
 const VERSION_FG: Color = Color::Rgb(80, 80, 100);
 const COUNT_FG: Color = Color::Rgb(100, 100, 120);
 const SECTION_FG: Color = Color::Rgb(140, 120, 180);
+const CONST_HDR_BG: Color = Color::Rgb(52, 38, 6);
+const CONST_BG: Color = Color::Rgb(28, 21, 5);
+const CONST_ZEBRA_BG: Color = Color::Rgb(38, 29, 7);
+const CONST_FG: Color = Color::Rgb(255, 212, 48);
 const REPO_FG: Color = Color::Rgb(180, 180, 200);
 const TREE_GUIDE: Color = Color::Rgb(55, 55, 75);
 
@@ -137,6 +141,10 @@ pub fn draw(f: &mut Frame, app: &App) {
             dim_background(f);
             draw_rename_modal(f, app);
         }
+        Mode::ConfirmPin => {
+            dim_background(f);
+            draw_pin_modal(f, app);
+        }
         Mode::ConfirmKill => {
             dim_background(f);
             draw_kill_modal(f, app);
@@ -216,29 +224,51 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         .copied();
 
     let mut selectable_row_idx = 0usize;
+    let mut in_constants = false;
     let rows: Vec<Row> = app
         .display_items
         .iter()
         .enumerate()
         .map(|(_i, item)| match item {
             ListItem::SectionHeader(title) => {
-                let full_width_name = format!("  {title}");
-                Row::new(vec![
-                    Cell::from(Line::from(Span::styled(
-                        full_width_name,
-                        Style::default()
-                            .fg(SECTION_FG)
-                            .bg(BASE_BG)
-                            .add_modifier(Modifier::BOLD | Modifier::DIM),
-                    ))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                ])
-                .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
+                in_constants = title == "Constants";
+                if in_constants {
+                    let full_width_name = format!("  ◆ {title}");
+                    Row::new(vec![
+                        Cell::from(Line::from(Span::styled(
+                            full_width_name,
+                            Style::default()
+                                .fg(CONST_FG)
+                                .bg(CONST_HDR_BG)
+                                .add_modifier(Modifier::BOLD),
+                        ))),
+                        Cell::from(Span::styled("", Style::default().bg(CONST_HDR_BG))),
+                        Cell::from(Span::styled("", Style::default().bg(CONST_HDR_BG))),
+                        Cell::from(Span::styled("", Style::default().bg(CONST_HDR_BG))),
+                        Cell::from(Span::styled("", Style::default().bg(CONST_HDR_BG))),
+                    ])
+                    .style(Style::default().fg(CONST_FG).bg(CONST_HDR_BG))
+                    .top_margin(1)
+                } else {
+                    let full_width_name = format!("  {title}");
+                    Row::new(vec![
+                        Cell::from(Line::from(Span::styled(
+                            full_width_name,
+                            Style::default()
+                                .fg(SECTION_FG)
+                                .bg(BASE_BG)
+                                .add_modifier(Modifier::BOLD | Modifier::DIM),
+                        ))),
+                        Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                        Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                        Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                        Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                    ])
+                    .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
+                }
             }
             ListItem::Separator => {
+                in_constants = false;
                 let line_char = "\u{2500}"; // ─
                 let total_w = (name_w + STATE_W + proc_w + UPTIME_W + DATE_W + COL_SPACING * 4) as usize;
                 let line_str: String = line_char.repeat(total_w);
@@ -287,7 +317,9 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                 prefix,
                 ..
             } => {
-                let bg = if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
+                let bg = if in_constants {
+                    if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
+                } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
 
                 let margin = "  ";
@@ -392,16 +424,19 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
             }
             ListItem::SessionItem(session) => {
                 let is_current = app.is_current_session(session);
+                let is_throwaway = session.name.starts_with("tmp-");
 
                 let state_color = match session.state {
                     SessionState::Detached => GREEN,
                     SessionState::Attached => YELLOW,
                 };
 
-                let bg = if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
+                let bg = if in_constants {
+                    if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
+                } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
-                let name_fg = if is_current { ACCENT } else { GREEN };
-                let prefix = if is_current { "\u{25c6} " } else { "  " };
+                let name_fg = if is_current { ACCENT } else if is_throwaway { DIM } else { GREEN };
+                let prefix = if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else { "  " };
                 let avail = name_chars.saturating_sub(prefix.chars().count());
                 let name_text = truncate(&session.name, avail);
 
@@ -522,7 +557,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     let mut bottom_left_spans: Vec<Span> = Vec::new();
 
     let hints: &[(&str, &str)] = &[
-        ("Enter","Attach"), ("c","Create"), ("n","Rename"), ("x","Kill"), ("p","Pin"), ("C","Constant"), ("/","Search"), ("q","Quit"),
+        ("Enter","Attach"), ("c","Create"), ("t","Throwaway"), ("n","Rename"), ("x","Kill"), ("p","Pin"), ("C","Constant"), ("/","Search"), ("q","Quit"),
     ];
     for (i, (key, desc)) in hints.iter().enumerate() {
         if i > 0 {
@@ -742,6 +777,54 @@ fn draw_rename_modal(f: &mut Frame, app: &App) {
     );
 }
 
+// ── Pin confirmation modal ──────────────────────────────────
+
+fn draw_pin_modal(f: &mut Frame, app: &App) {
+    let name = app.pin_target.as_deref().unwrap_or("");
+    let is_pinned = app.pins.contains(name);
+    let action = if is_pinned { "Unpin" } else { "Pin" };
+
+    let area = f.area();
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            format!(" {action} "),
+            Style::default()
+                .fg(MODAL_TITLE)
+                .bg(MODAL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" {action} '{name}'?"),
+            Style::default().fg(FG_BRIGHT).bg(MODAL_BG),
+        )),
+        Line::from(Span::styled(
+            " y/Enter: confirm  n/Esc: cancel",
+            Style::default().fg(DIM).bg(MODAL_BG),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
+        inner,
+    );
+}
+
 // ── Kill confirmation modal ─────────────────────────────────
 
 fn draw_kill_modal(f: &mut Frame, app: &App) {
@@ -781,7 +864,7 @@ fn draw_kill_modal(f: &mut Frame, app: &App) {
             Style::default().fg(FG_BRIGHT).bg(KILL_BG),
         )),
         Line::from(Span::styled(
-            " y/Enter: confirm  n/Esc: cancel",
+            " x: confirm  Esc: cancel",
             Style::default().fg(DIM).bg(KILL_BG),
         )),
     ];

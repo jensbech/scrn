@@ -11,6 +11,7 @@ pub enum Mode {
     Searching,
     Creating,
     Renaming,
+    ConfirmPin,
     ConfirmKill,
     ConfirmKillAll1,
     ConfirmKillAll2,
@@ -58,6 +59,7 @@ pub struct App {
     pub workspace_tree: Option<TreeNode>,
     pub display_items: Vec<ListItem>,
     pub selectable_indices: Vec<usize>,
+    pub pin_target: Option<String>,
     pub kill_session_info: Option<(String, String)>,
     /// screen PID -> foreground process name (empty = idle shell)
     pub foreground_procs: HashMap<u32, String>,
@@ -89,6 +91,7 @@ impl App {
             workspace_tree: None,
             display_items: Vec::new(),
             selectable_indices: Vec::new(),
+            pin_target: None,
             kill_session_info: None,
             foreground_procs: HashMap::new(),
             history: load_history(),
@@ -188,25 +191,38 @@ impl App {
         self.rebuild_display_list();
     }
 
-    pub fn toggle_pin(&mut self) {
+    pub fn start_pin_confirm(&mut self) {
         let name = match self.selected_display_item() {
             Some(ListItem::TreeRepo { name, .. }) => name.clone(),
             Some(ListItem::SessionItem(session)) => session.name.clone(),
             _ => return,
         };
-        if self.pins.contains(&name) {
-            self.pins.remove(&name);
-            self.set_status(format!("Unpinned '{name}'"));
-        } else {
-            self.pins.insert(name.clone());
-            // Mutual exclusivity: remove from constants if present
-            if self.constants.remove(&name) {
-                save_constants(&self.constants);
+        self.pin_target = Some(name);
+        self.mode = Mode::ConfirmPin;
+    }
+
+    pub fn confirm_pin(&mut self) {
+        if let Some(name) = self.pin_target.take() {
+            if self.pins.contains(&name) {
+                self.pins.remove(&name);
+                self.set_status(format!("Unpinned '{name}'"));
+            } else {
+                self.pins.insert(name.clone());
+                // Mutual exclusivity: remove from constants if present
+                if self.constants.remove(&name) {
+                    save_constants(&self.constants);
+                }
+                self.set_status(format!("Pinned '{name}'"));
             }
-            self.set_status(format!("Pinned '{name}'"));
+            save_pins(&self.pins);
+            self.rebuild_display_list();
         }
-        save_pins(&self.pins);
-        self.rebuild_display_list();
+        self.mode = Mode::Normal;
+    }
+
+    pub fn cancel_pin(&mut self) {
+        self.pin_target = None;
+        self.mode = Mode::Normal;
     }
 
     pub fn toggle_constant(&mut self) {
@@ -302,7 +318,7 @@ impl App {
         }
 
         // Orphan sessions: not merged into any tree repo, and not a *-2 pane session
-        let mut orphan_sessions: Vec<&Session> = sessions_clone
+        let mut all_orphan_sessions: Vec<&Session> = sessions_clone
             .iter()
             .filter(|s| {
                 !merged_sessions.contains(&s.name)
@@ -312,7 +328,7 @@ impl App {
 
         // Sort by fuzzy match score when searching
         if !self.search_input.is_empty() {
-            orphan_sessions.sort_by(|a, b| {
+            all_orphan_sessions.sort_by(|a, b| {
                 let score_a = fuzzy_match(&a.name, &self.search_input)
                     .map(|(_, s)| s)
                     .unwrap_or(i32::MIN);
@@ -322,6 +338,16 @@ impl App {
                 score_b.cmp(&score_a)
             });
         }
+
+        // Split throwaway sessions (tmp-*) from regular orphans
+        let orphan_sessions: Vec<&Session> = all_orphan_sessions.iter()
+            .filter(|s| !s.name.starts_with("tmp-"))
+            .copied()
+            .collect();
+        let throwaway_sessions: Vec<&Session> = all_orphan_sessions.iter()
+            .filter(|s| s.name.starts_with("tmp-"))
+            .copied()
+            .collect();
 
         // Build orphan items
         let mut orphan_items: Vec<ListItem> = Vec::new();
@@ -333,6 +359,19 @@ impl App {
                 let idx = orphan_items.len();
                 orphan_items.push(ListItem::SessionItem((*session).clone()));
                 orphan_selectable.push(idx);
+            }
+        }
+
+        // Build throwaway items (always appended last)
+        let mut throwaway_items: Vec<ListItem> = Vec::new();
+        let mut throwaway_selectable: Vec<usize> = Vec::new();
+
+        if !throwaway_sessions.is_empty() {
+            throwaway_items.push(ListItem::SectionHeader("Throwaway".to_string()));
+            for session in &throwaway_sessions {
+                let idx = throwaway_items.len();
+                throwaway_items.push(ListItem::SessionItem((*session).clone()));
+                throwaway_selectable.push(idx);
             }
         }
 
@@ -484,7 +523,7 @@ impl App {
                 }
             }).max().unwrap_or(i32::MIN);
 
-            let best_orphan_score = orphan_sessions.iter().filter_map(|s| {
+            let best_orphan_score = all_orphan_sessions.iter().filter_map(|s| {
                 fuzzy_match(&s.name, &self.search_input).map(|(_, sc)| sc)
             }).max().unwrap_or(i32::MIN);
 
@@ -509,6 +548,9 @@ impl App {
             append_group(ws_items, ws_selectable, &mut self.display_items, &mut self.selectable_indices);
             append_group(orphan_items, orphan_selectable, &mut self.display_items, &mut self.selectable_indices);
         }
+
+        // Throwaway sessions always go at the very bottom
+        append_group(throwaway_items, throwaway_selectable, &mut self.display_items, &mut self.selectable_indices);
 
         // Apply "opened only" filter
         if self.filter_opened {
@@ -637,6 +679,24 @@ impl App {
 
     pub fn cancel_create(&mut self) {
         self.mode = Mode::Normal;
+    }
+
+    pub fn create_throwaway(&mut self) {
+        let name = generate_throwaway_name(&self.all_sessions);
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        self.record_opened(&name);
+        self.action = Action::Create(name, Some(PathBuf::from(home)));
+    }
+
+    pub fn kill_all_throwaway(&mut self) {
+        let throwaway: Vec<String> = self.all_sessions
+            .iter()
+            .filter(|s| s.name.starts_with("tmp-"))
+            .map(|s| s.pid_name.clone())
+            .collect();
+        for pid_name in throwaway {
+            let _ = screen::kill_session(&pid_name);
+        }
     }
 
     pub fn start_rename(&mut self) {
@@ -1064,6 +1124,7 @@ fn save_sessions(all_sessions: &[Session], workspace_tree: &Option<TreeNode>) {
         .iter()
         .filter(|s| !s.name.ends_with("-2"))
         .filter(|s| !s.name.starts_with("tty") && !s.name.starts_with("pts"))
+        .filter(|s| !s.name.starts_with("tmp-"))
         .map(|s| {
             if let Some(p) = repo_paths.get(&s.name) {
                 format!("{}\t{}", s.name, p.display())
@@ -1113,6 +1174,31 @@ fn format_relative(now: u64, ts: u64) -> String {
         let m = d / 30;
         if m == 1 { "1 month ago".to_string() } else { format!("{m} months ago") }
     }
+}
+
+fn generate_throwaway_name(all_sessions: &[Session]) -> String {
+    const ADJS: &[&str] = &[
+        "swift", "calm", "bold", "dark", "pale", "warm", "cold", "wild", "soft", "keen",
+        "neat", "raw", "odd", "dry", "old", "vast", "deep", "rich", "slim", "deft",
+    ];
+    const NOUNS: &[&str] = &[
+        "fox", "hawk", "wolf", "bear", "deer", "owl", "crow", "hare", "swan", "wren",
+        "kite", "elk", "jay", "cod", "oak", "ash", "elm", "bay", "crag", "glen",
+    ];
+    let existing: HashSet<&str> = all_sessions.iter().map(|s| s.name.as_str()).collect();
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as usize;
+    for i in 0..200_usize {
+        let adj = ADJS[seed.wrapping_add(i.wrapping_mul(17)) % ADJS.len()];
+        let noun = NOUNS[seed.wrapping_add(i.wrapping_mul(31)).wrapping_mul(3) % NOUNS.len()];
+        let name = format!("tmp-{adj}-{noun}");
+        if !existing.contains(name.as_str()) {
+            return name;
+        }
+    }
+    format!("tmp-{}", seed % 10000)
 }
 
 pub fn fuzzy_match(haystack: &str, needle: &str) -> Option<(Vec<usize>, i32)> {
