@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -104,7 +106,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     // Paint entire screen with explicit fg + bg on every cell.
     let area = f.area();
     let buf = f.buffer_mut();
@@ -144,6 +146,10 @@ pub fn draw(f: &mut Frame, app: &App) {
             dim_background(f);
             draw_pin_modal(f, app);
         }
+        Mode::ConfirmConstant => {
+            dim_background(f);
+            draw_constant_modal(f, app);
+        }
         Mode::ConfirmKill => {
             dim_background(f);
             draw_kill_modal(f, app);
@@ -180,8 +186,8 @@ fn dim_background(f: &mut Frame) {
 
 // ── Main table ──────────────────────────────────────────────
 
-fn draw_table(f: &mut Frame, app: &App, area: Rect) {
-    const STATE_W: u16 = 10;
+fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
+    const STATE_W: u16 = 3;
     const UPTIME_W: u16 = 8;
     const IDLE_W: u16 = 8;
     const DATE_W: u16 = 22;
@@ -210,7 +216,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
 
     let header = Row::new(vec![
         Cell::from("Name"),
-        Cell::from("State"),
+        Cell::from("S"),
         Cell::from("Process"),
         Cell::from("Uptime"),
         Cell::from("Idle"),
@@ -224,6 +230,14 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         .get(app.selected)
         .copied();
 
+    let mut name_counts: HashMap<String, usize> = HashMap::new();
+    for item in &app.display_items {
+        if let ListItem::SessionItem(s) = item {
+            *name_counts.entry(s.name.clone()).or_insert(0) += 1;
+        }
+    }
+    let mut name_seen: HashMap<String, usize> = HashMap::new();
+
     let mut selectable_row_idx = 0usize;
     let mut in_constants = !app.constants.is_empty();
     let rows: Vec<Row> = app
@@ -232,7 +246,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(_i, item)| match item {
             ListItem::SectionHeader(title) => {
-                let full_width_name = format!("  {title}");
+                let full_width_name = format!(" \u{2500} {title}");
                 Row::new(vec![
                     Cell::from(Line::from(Span::styled(
                         full_width_name,
@@ -366,7 +380,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                         SessionState::Detached => GREEN,
                         SessionState::Attached => YELLOW,
                     };
-                    (s.state.as_str().to_string(), color)
+                    ("\u{25cf}".to_string(), color)
                 } else {
                     (String::new(), DIM)
                 };
@@ -390,16 +404,19 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     .last_opened(name)
                     .unwrap_or_default();
 
+                let proc_cell = if proc_text.is_empty() {
+                    Cell::from(Span::styled("\u{2500}", Style::default().fg(DIM).bg(bg)))
+                } else {
+                    Cell::from(Span::styled(proc_text, Style::default().fg(PROC_FG).bg(bg)))
+                };
+
                 Row::new(vec![
                     name_cell,
                     Cell::from(Span::styled(
                         state_text,
                         Style::default().fg(state_color).bg(bg),
                     )),
-                    Cell::from(Span::styled(
-                        proc_text,
-                        Style::default().fg(PROC_FG).bg(bg),
-                    )),
+                    proc_cell,
                     Cell::from(Span::styled(
                         uptime_text,
                         Style::default().fg(DIM).bg(bg),
@@ -431,7 +448,18 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                 let name_fg = if is_current { ACCENT } else if is_throwaway { DIM } else { GREEN };
                 let prefix = if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else { "  " };
                 let avail = name_chars.saturating_sub(prefix.chars().count());
-                let name_text = truncate(&session.name, avail);
+                let display_name = if name_counts.get(&session.name).copied().unwrap_or(0) > 1 {
+                    let seen = name_seen.entry(session.name.clone()).or_insert(0);
+                    *seen += 1;
+                    if *seen > 1 {
+                        format!("{} \u{b7}{}", session.name, seen)
+                    } else {
+                        session.name.clone()
+                    }
+                } else {
+                    session.name.clone()
+                };
+                let name_text = truncate(&display_name, avail);
 
                 let prefix_fg = if is_current { ACCENT } else { FG };
 
@@ -500,16 +528,19 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     .map(format_idle)
                     .unwrap_or_default();
 
+                let proc_cell = if proc_text.is_empty() {
+                    Cell::from(Span::styled("\u{2500}", Style::default().fg(DIM).bg(bg)))
+                } else {
+                    Cell::from(Span::styled(proc_text, Style::default().fg(PROC_FG).bg(bg)))
+                };
+
                 Row::new(vec![
                     name_cell,
                     Cell::from(Span::styled(
-                        session.state.as_str().to_string(),
+                        "\u{25cf}",
                         Style::default().fg(state_color).bg(bg),
                     )),
-                    Cell::from(Span::styled(
-                        proc_text,
-                        Style::default().fg(PROC_FG).bg(bg),
-                    )),
+                    proc_cell,
                     Cell::from(Span::styled(
                         uptime_text,
                         Style::default().fg(DIM).bg(bg),
@@ -634,6 +665,10 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
 
         f.render_stateful_widget(table, area, &mut state);
 
+        app.table_data_y = area.y + 3;
+        app.table_data_end_y = area.y + area.height.saturating_sub(1);
+        app.table_scroll_offset = state.offset();
+
         // Scrollbar
         let visible_rows = area.height.saturating_sub(4) as usize; // borders + header + header margin
         if app.selectable_indices.len() > visible_rows {
@@ -657,7 +692,8 @@ fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
     } else {
         ""
     };
-    let line = Line::from(vec![
+    let input_fg = if app.search_filter_active { FG_BRIGHT } else { DIM };
+    let mut spans = vec![
         Span::styled(
             " /",
             Style::default()
@@ -667,17 +703,24 @@ fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled(
             app.search_input.clone(),
-            Style::default().fg(FG_BRIGHT).bg(SEARCH_BG),
+            Style::default().fg(input_fg).bg(SEARCH_BG),
         ),
         Span::styled(
             cursor.to_string(),
             Style::default().fg(MATCH_FG).bg(SEARCH_BG),
         ),
-        Span::styled(
-            format!("  ({} matches)", app.selectable_indices.len()),
-            Style::default().fg(COUNT_FG).bg(SEARCH_BG),
-        ),
-    ]);
+    ];
+    if !app.search_filter_active {
+        spans.push(Span::styled(
+            " [off]",
+            Style::default().fg(DIM).bg(SEARCH_BG),
+        ));
+    }
+    spans.push(Span::styled(
+        format!("  ({} matches)", app.selectable_indices.len()),
+        Style::default().fg(COUNT_FG).bg(SEARCH_BG),
+    ));
+    let line = Line::from(spans);
 
     f.render_widget(
         Paragraph::new(line).style(Style::default().fg(FG).bg(SEARCH_BG)),
@@ -828,6 +871,52 @@ fn draw_pin_modal(f: &mut Frame, app: &App) {
     );
 }
 
+// ── Constant confirmation modal ──────────────────────────────
+
+fn draw_constant_modal(f: &mut Frame, app: &App) {
+    let name = app.constant_target.as_deref().unwrap_or("");
+
+    let area = f.area();
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            " Constant ",
+            Style::default()
+                .fg(MODAL_TITLE)
+                .bg(MODAL_BG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" Add/Remove '{name}' from constants?"),
+            Style::default().fg(FG_BRIGHT).bg(MODAL_BG),
+        )),
+        Line::from(Span::styled(
+            " y/Enter: confirm  n/Esc: cancel",
+            Style::default().fg(DIM).bg(MODAL_BG),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
+        inner,
+    );
+}
+
 // ── Kill confirmation modal ─────────────────────────────────
 
 fn draw_kill_modal(f: &mut Frame, app: &App) {
@@ -867,7 +956,7 @@ fn draw_kill_modal(f: &mut Frame, app: &App) {
             Style::default().fg(FG_BRIGHT).bg(KILL_BG),
         )),
         Line::from(Span::styled(
-            " x: confirm  Esc: cancel",
+            " y: confirm  Esc: cancel",
             Style::default().fg(DIM).bg(KILL_BG),
         )),
     ];

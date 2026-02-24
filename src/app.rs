@@ -12,6 +12,7 @@ pub enum Mode {
     Creating,
     Renaming,
     ConfirmPin,
+    ConfirmConstant,
     ConfirmKill,
     ConfirmKillAll1,
     ConfirmKillAll2,
@@ -60,7 +61,10 @@ pub struct App {
     pub display_items: Vec<ListItem>,
     pub selectable_indices: Vec<usize>,
     pub pin_target: Option<String>,
+    pub constant_target: Option<String>,
     pub kill_session_info: Option<(String, String)>,
+    pub pre_search_selected: usize,
+    pub search_filter_active: bool,
     /// screen PID -> foreground process name (empty = idle shell)
     pub foreground_procs: HashMap<u32, String>,
     /// session name -> unix timestamp of last attach
@@ -70,6 +74,10 @@ pub struct App {
     pub pins: HashSet<String>,
     /// constant session/repo names — always shown above pinned
     pub constants: HashSet<String>,
+    pub table_data_y: u16,
+    pub table_data_end_y: u16,
+    pub table_scroll_offset: usize,
+    pub last_click: Option<(Instant, usize)>,
 }
 
 impl App {
@@ -92,12 +100,19 @@ impl App {
             display_items: Vec::new(),
             selectable_indices: Vec::new(),
             pin_target: None,
+            constant_target: None,
             kill_session_info: None,
+            pre_search_selected: 0,
+            search_filter_active: true,
             foreground_procs: HashMap::new(),
             history: load_history(),
             filter_opened: false,
             pins: load_pins(),
             constants: load_constants(),
+            table_data_y: 0,
+            table_data_end_y: 0,
+            table_scroll_offset: 0,
+            last_click: None,
         }
     }
 
@@ -225,33 +240,48 @@ impl App {
         self.mode = Mode::Normal;
     }
 
-    pub fn toggle_constant(&mut self) {
+    pub fn start_constant_confirm(&mut self) {
         let name = match self.selected_display_item() {
             Some(ListItem::TreeRepo { name, .. }) => name.clone(),
             Some(ListItem::SessionItem(session)) => session.name.clone(),
             _ => return,
         };
-        if self.constants.contains(&name) {
-            self.constants.remove(&name);
-            self.set_status(format!("Removed from constants '{name}'"));
-        } else {
-            self.constants.insert(name.clone());
-            // Mutual exclusivity: remove from pins if present
-            if self.pins.remove(&name) {
-                save_pins(&self.pins);
+        self.constant_target = Some(name);
+        self.mode = Mode::ConfirmConstant;
+    }
+
+    pub fn confirm_constant(&mut self) {
+        if let Some(name) = self.constant_target.take() {
+            if self.constants.contains(&name) {
+                self.constants.remove(&name);
+                self.set_status(format!("Removed from constants '{name}'"));
+            } else {
+                self.constants.insert(name.clone());
+                if self.pins.remove(&name) {
+                    save_pins(&self.pins);
+                }
+                self.set_status(format!("Added to constants '{name}'"));
             }
-            self.set_status(format!("Added to constants '{name}'"));
+            save_constants(&self.constants);
+            self.rebuild_display_list();
         }
-        save_constants(&self.constants);
-        self.rebuild_display_list();
+        self.mode = Mode::Normal;
+    }
+
+    pub fn cancel_constant(&mut self) {
+        self.constant_target = None;
+        self.mode = Mode::Normal;
     }
 
     pub fn start_search(&mut self) {
         self.mode = Mode::Searching;
         self.search_input.clear();
+        self.pre_search_selected = self.selected;
+        self.search_filter_active = true;
     }
 
     pub fn apply_search_filter(&mut self) {
+        let filter_active = self.search_filter_active && !self.search_input.is_empty();
         self.sessions = self
             .all_sessions
             .iter()
@@ -262,7 +292,7 @@ impl App {
                 if s.name.starts_with("tty") || s.name.starts_with("pts") {
                     return false;
                 }
-                if self.search_input.is_empty() {
+                if !filter_active {
                     true
                 } else {
                     let haystack = format!("{} {}", s.name, s.pid_name);
@@ -272,6 +302,11 @@ impl App {
             .cloned()
             .collect();
         self.rebuild_display_list();
+    }
+
+    pub fn toggle_search_filter(&mut self) {
+        self.search_filter_active = !self.search_filter_active;
+        self.apply_search_filter();
     }
 
     fn rebuild_display_list(&mut self) {
@@ -290,9 +325,11 @@ impl App {
         let mut ws_items: Vec<ListItem> = Vec::new();
         let mut ws_selectable: Vec<usize> = Vec::new();
 
+        let filter_active = self.search_filter_active && !self.search_input.is_empty();
+
         if let Some(ref tree) = self.workspace_tree {
             let tree = tree.clone();
-            if self.search_input.is_empty() {
+            if !filter_active {
                 flatten_tree(
                     &tree,
                     0,
@@ -327,7 +364,7 @@ impl App {
             .collect();
 
         // Sort by fuzzy match score when searching
-        if !self.search_input.is_empty() {
+        if filter_active {
             all_orphan_sessions.sort_by(|a, b| {
                 let score_a = fuzzy_match(&a.name, &self.search_input)
                     .map(|(_, s)| s)
@@ -513,7 +550,7 @@ impl App {
         }
 
         // When searching, hoist the group with the best match score first
-        let orphans_first = if !self.search_input.is_empty() {
+        let orphans_first = if filter_active {
             let best_ws_score = ws_items.iter().filter_map(|item| {
                 if let ListItem::TreeRepo { name, .. } = item {
                     fuzzy_match(name, &self.search_input).map(|(_, s)| s)
@@ -618,7 +655,10 @@ impl App {
 
     pub fn clear_search(&mut self) {
         self.search_input.clear();
+        self.search_filter_active = true;
         self.apply_search_filter();
+        self.selected = self.pre_search_selected
+            .min(self.selectable_indices.len().saturating_sub(1));
         self.mode = Mode::Normal;
     }
 

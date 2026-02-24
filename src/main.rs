@@ -8,11 +8,11 @@ mod workspace;
 
 use std::io;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEventKind, KeyboardEnhancementFlags, MouseEventKind,
+    Event, KeyCode, KeyEventKind, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
@@ -153,6 +153,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn hit_test_row(app: &App, row: u16) -> Option<usize> {
+    if row < app.table_data_y || row >= app.table_data_end_y {
+        return None;
+    }
+    let visual_idx = (row - app.table_data_y) as usize + app.table_scroll_offset;
+    app.selectable_indices.iter().position(|&si| si == visual_idx)
+}
+
 /// Show the TUI session picker and return the user's chosen action.
 fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
     let mut stdout = io::stdout();
@@ -211,14 +219,22 @@ fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
                         KeyCode::Char('X') => app.start_kill_all(),
                         KeyCode::Char('/') => app.start_search(),
                         KeyCode::Char('p') => app.start_pin_confirm(),
-                        KeyCode::Char('C') => app.toggle_constant(),
+                        KeyCode::Char('C') => app.start_constant_confirm(),
+                        KeyCode::Tab => {
+                            if !app.search_input.is_empty() {
+                                app.toggle_search_filter();
+                            }
+                        }
                         KeyCode::Char('r') => app.refresh_sessions(),
                         KeyCode::Char('t') => app.create_throwaway(),
                         _ => {}
                     },
                     Mode::Searching => match key.code {
                         KeyCode::Esc => app.clear_search(),
-                        KeyCode::Enter => app.confirm_search(),
+                        KeyCode::Enter => {
+                            app.confirm_search();
+                            app.select_for_attach();
+                        }
                         KeyCode::Up => app.move_up(),
                         KeyCode::Down => app.move_down(),
                         KeyCode::Backspace => {
@@ -278,8 +294,13 @@ fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
                         KeyCode::Char('n') | KeyCode::Esc => app.cancel_pin(),
                         _ => {}
                     },
+                    Mode::ConfirmConstant => match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => app.confirm_constant(),
+                        KeyCode::Char('n') | KeyCode::Esc => app.cancel_constant(),
+                        _ => {}
+                    },
                     Mode::ConfirmKill => match key.code {
-                        KeyCode::Char('x') => app.confirm_kill(),
+                        KeyCode::Char('y') => app.confirm_kill(),
                         KeyCode::Esc => app.cancel_kill(),
                         _ => {}
                     },
@@ -307,6 +328,27 @@ fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
                     match mouse.kind {
                         MouseEventKind::ScrollUp => app.move_up(),
                         MouseEventKind::ScrollDown => app.move_down(),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if matches!(app.mode, Mode::Normal | Mode::Searching) {
+                                if let Some(idx) = hit_test_row(app, mouse.row) {
+                                    let now = Instant::now();
+                                    let is_double = app.last_click
+                                        .as_ref()
+                                        .map(|(t, prev)| t.elapsed() < Duration::from_millis(400) && *prev == idx)
+                                        .unwrap_or(false);
+                                    app.selected = idx;
+                                    if is_double {
+                                        app.last_click = None;
+                                        if app.mode == Mode::Searching {
+                                            app.confirm_search();
+                                        }
+                                        app.select_for_attach();
+                                    } else {
+                                        app.last_click = Some((now, idx));
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
