@@ -278,47 +278,67 @@ const SHELL_NAMES: &[&str] = &[
     "bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "csh",
 ];
 
-/// Strip path prefix and login-shell `-` so `/bin/zsh` and `-zsh` both become `zsh`.
-fn comm_base(comm: &str) -> &str {
-    let base = comm.rsplit('/').next().unwrap_or(comm);
+/// Strip path prefix and login-shell `-` from a single token (argv[0]).
+/// `/bin/zsh` → `zsh`, `-zsh` → `zsh`.
+fn argv0_base(token: &str) -> &str {
+    let base = token.rsplit('/').next().unwrap_or(token);
     base.strip_prefix('-').unwrap_or(base)
 }
 
-fn is_shell_or_screen(comm: &str) -> bool {
-    let base = comm_base(comm);
+/// True when the first word of `args` is a shell or screen itself.
+fn is_shell_or_screen(args: &str) -> bool {
+    let first = args.split_whitespace().next().unwrap_or(args);
+    let base = argv0_base(first);
     base.is_empty() || base == "screen" || SHELL_NAMES.contains(&base)
 }
 
+/// Basename any token that looks like an absolute path.
+fn normalize_token(token: &str) -> &str {
+    if token.starts_with('/') || token.starts_with('~') {
+        token.rsplit('/').next().unwrap_or(token)
+    } else {
+        token
+    }
+}
+
+/// Replace full paths in argv[0] and any path-like arguments with their basenames.
+/// `/usr/local/bin/npm run dev`          → `npm run dev`
+/// `node /Users/jens/project/server.js`  → `node server.js`
+fn normalize_args(args: &str) -> String {
+    let mut tokens = args.split_whitespace();
+    let Some(argv0) = tokens.next() else { return String::new() };
+    let mut parts = vec![argv0_base(argv0).to_string()];
+    for token in tokens {
+        parts.push(normalize_token(token).to_string());
+    }
+    parts.join(" ")
+}
+
 /// Runs one `ps` call and returns a map from screen session PID → foreground
-/// process name (empty if the session is just sitting at a shell prompt).
+/// process + arguments (empty if the session is just sitting at a shell prompt).
 pub fn get_foreground_processes(session_pids: &[u32]) -> HashMap<u32, String> {
     if session_pids.is_empty() {
         return HashMap::new();
     }
-    let output = match Command::new("ps").args(["-axo", "pid=,ppid=,comm="]).output() {
+    let output = match Command::new("ps").args(["-axo", "pid=,ppid=,args="]).output() {
         Ok(o) => o,
         Err(_) => return HashMap::new(),
     };
     let text = String::from_utf8_lossy(&output.stdout);
 
-    let mut names: HashMap<u32, String> = HashMap::new();
+    let mut args_map: HashMap<u32, String> = HashMap::new();
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
 
     for line in text.lines() {
-        let mut iter = line.split_whitespace();
-        let pid = match iter.next().and_then(|s| s.parse::<u32>().ok()) {
-            Some(p) => p,
-            None => continue,
-        };
-        let ppid = match iter.next().and_then(|s| s.parse::<u32>().ok()) {
-            Some(p) => p,
-            None => continue,
-        };
-        let comm = match iter.next() {
-            Some(c) => c.to_string(),
-            None => continue,
-        };
-        names.insert(pid, comm);
+        let trimmed = line.trim();
+        // pid and ppid are numeric, everything after is the full args string.
+        let Some((pid_str, rest)) = trimmed.split_once(|c: char| c.is_ascii_whitespace()) else { continue };
+        let rest = rest.trim_start();
+        let Some((ppid_str, args_str)) = rest.split_once(|c: char| c.is_ascii_whitespace()) else { continue };
+        let Some(pid) = pid_str.parse::<u32>().ok() else { continue };
+        let Some(ppid) = ppid_str.parse::<u32>().ok() else { continue };
+        let args = args_str.trim_start().to_string();
+        args_map.insert(pid, args);
         children.entry(ppid).or_default().push(pid);
     }
 
@@ -337,11 +357,11 @@ pub fn get_foreground_processes(session_pids: &[u32]) -> HashMap<u32, String> {
                     if !visited.insert(kid) {
                         continue;
                     }
-                    let comm = names.get(&kid).map(|s| s.as_str()).unwrap_or("");
-                    if is_shell_or_screen(comm) {
+                    let args = args_map.get(&kid).map(|s| s.as_str()).unwrap_or("");
+                    if is_shell_or_screen(args) {
                         next.push(kid);
                     } else {
-                        result.insert(screen_pid, comm_base(comm).to_string());
+                        result.insert(screen_pid, normalize_args(args));
                         continue 'outer;
                     }
                 }

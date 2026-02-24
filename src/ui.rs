@@ -175,15 +175,24 @@ fn dim_background(f: &mut Frame) {
 
 fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     const STATE_W: u16 = 10;
-    const PROC_W: u16 = 12;
     const UPTIME_W: u16 = 8;
     const DATE_W: u16 = 22;
     const COL_SPACING: u16 = 2;
     const BORDERS: u16 = 2;
     const HIGHLIGHT_SYM: u16 = 2;
+    const MIN_NAME_W: u16 = 10;
 
-    let fixed = STATE_W + PROC_W + UPTIME_W + DATE_W + (COL_SPACING * 4) + BORDERS + HIGHLIGHT_SYM;
-    let name_w = area.width.saturating_sub(fixed).max(10);
+    // Size the process column to the widest actual value; give the name column what's left.
+    let max_proc_chars = app.display_items.iter().filter_map(|item| match item {
+        ListItem::SessionItem(s) => Some(app.session_proc(&s.pid_name).chars().count()),
+        ListItem::TreeRepo { session: Some(s), .. } => Some(app.session_proc(&s.pid_name).chars().count()),
+        _ => None,
+    }).max().unwrap_or(0) as u16;
+
+    let fixed_base = STATE_W + UPTIME_W + DATE_W + (COL_SPACING * 4) + BORDERS + HIGHLIGHT_SYM;
+    let available = area.width.saturating_sub(fixed_base);
+    let proc_w = max_proc_chars.min(available.saturating_sub(MIN_NAME_W));
+    let name_w = available.saturating_sub(proc_w).max(MIN_NAME_W);
     let name_chars = name_w as usize;
 
     let header_style = Style::default()
@@ -231,7 +240,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
             }
             ListItem::Separator => {
                 let line_char = "\u{2500}"; // ─
-                let total_w = (name_w + STATE_W + PROC_W + UPTIME_W + DATE_W + COL_SPACING * 4) as usize;
+                let total_w = (name_w + STATE_W + proc_w + UPTIME_W + DATE_W + COL_SPACING * 4) as usize;
                 let line_str: String = line_char.repeat(total_w);
                 Row::new(vec![
                     Cell::from(Span::styled(
@@ -348,7 +357,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
 
                 let proc_text = session
                     .as_ref()
-                    .map(|s| truncate(app.session_proc(&s.pid_name), PROC_W as usize))
+                    .map(|s| app.session_proc(&s.pid_name).to_string())
                     .unwrap_or_default();
 
                 let uptime_text = session
@@ -451,7 +460,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     Cell::from(Line::from(spans))
                 };
 
-                let proc_text = truncate(app.session_proc(&session.pid_name), PROC_W as usize);
+                let proc_text = app.session_proc(&session.pid_name).to_string();
 
                 let uptime_text = session
                     .created
@@ -485,7 +494,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     let widths = [
         Constraint::Min(name_w),
         Constraint::Length(STATE_W),
-        Constraint::Length(PROC_W),
+        Constraint::Length(proc_w),
         Constraint::Length(UPTIME_W),
         Constraint::Length(DATE_W),
     ];
