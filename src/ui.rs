@@ -35,6 +35,7 @@ const KILL_BG: Color = Color::Rgb(30, 15, 15);
 const KILL_TITLE: Color = Color::Rgb(220, 140, 140);
 const DIM_FG: Color = Color::Rgb(50, 50, 60);
 const DIM_BG: Color = Color::Rgb(10, 10, 15);
+const PROC_FG: Color = Color::Rgb(160, 190, 140);
 const VERSION_FG: Color = Color::Rgb(80, 80, 100);
 const COUNT_FG: Color = Color::Rgb(100, 100, 120);
 const SECTION_FG: Color = Color::Rgb(140, 120, 180);
@@ -174,13 +175,14 @@ fn dim_background(f: &mut Frame) {
 
 fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     const STATE_W: u16 = 10;
+    const PROC_W: u16 = 12;
     const UPTIME_W: u16 = 8;
     const DATE_W: u16 = 22;
     const COL_SPACING: u16 = 2;
     const BORDERS: u16 = 2;
     const HIGHLIGHT_SYM: u16 = 2;
 
-    let fixed = STATE_W + UPTIME_W + DATE_W + (COL_SPACING * 3) + BORDERS + HIGHLIGHT_SYM;
+    let fixed = STATE_W + PROC_W + UPTIME_W + DATE_W + (COL_SPACING * 4) + BORDERS + HIGHLIGHT_SYM;
     let name_w = area.width.saturating_sub(fixed).max(10);
     let name_chars = name_w as usize;
 
@@ -192,6 +194,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     let header = Row::new(vec![
         Cell::from("Name"),
         Cell::from("State"),
+        Cell::from("Process"),
         Cell::from("Uptime"),
         Cell::from("Last opened"),
     ])
@@ -222,18 +225,20 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                 ])
                 .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
             }
             ListItem::Separator => {
                 let line_char = "\u{2500}"; // ─
-                let total_w = (name_w + STATE_W + UPTIME_W + DATE_W + COL_SPACING * 3) as usize;
+                let total_w = (name_w + STATE_W + PROC_W + UPTIME_W + DATE_W + COL_SPACING * 4) as usize;
                 let line_str: String = line_char.repeat(total_w);
                 Row::new(vec![
                     Cell::from(Span::styled(
                         line_str,
                         Style::default().fg(BORDER_FG).bg(BASE_BG),
                     )),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
@@ -260,6 +265,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                 ));
                 Row::new(vec![
                     Cell::from(Line::from(spans)),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
@@ -340,6 +346,11 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     (String::new(), DIM)
                 };
 
+                let proc_text = session
+                    .as_ref()
+                    .map(|s| truncate(app.session_proc(&s.pid_name), PROC_W as usize))
+                    .unwrap_or_default();
+
                 let uptime_text = session
                     .as_ref()
                     .and_then(|s| s.created.map(format_uptime))
@@ -354,6 +365,10 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     Cell::from(Span::styled(
                         state_text,
                         Style::default().fg(state_color).bg(bg),
+                    )),
+                    Cell::from(Span::styled(
+                        proc_text,
+                        Style::default().fg(PROC_FG).bg(bg),
                     )),
                     Cell::from(Span::styled(
                         uptime_text,
@@ -436,6 +451,8 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     Cell::from(Line::from(spans))
                 };
 
+                let proc_text = truncate(app.session_proc(&session.pid_name), PROC_W as usize);
+
                 let uptime_text = session
                     .created
                     .map(format_uptime)
@@ -446,6 +463,10 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     Cell::from(Span::styled(
                         session.state.as_str().to_string(),
                         Style::default().fg(state_color).bg(bg),
+                    )),
+                    Cell::from(Span::styled(
+                        proc_text,
+                        Style::default().fg(PROC_FG).bg(bg),
                     )),
                     Cell::from(Span::styled(
                         uptime_text,
@@ -464,6 +485,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     let widths = [
         Constraint::Min(name_w),
         Constraint::Length(STATE_W),
+        Constraint::Length(PROC_W),
         Constraint::Length(UPTIME_W),
         Constraint::Length(DATE_W),
     ];

@@ -59,6 +59,8 @@ pub struct App {
     pub display_items: Vec<ListItem>,
     pub selectable_indices: Vec<usize>,
     pub kill_session_info: Option<(String, String)>,
+    /// screen PID -> foreground process name (empty = idle shell)
+    pub foreground_procs: HashMap<u32, String>,
     /// session name -> unix timestamp of last attach
     pub history: HashMap<String, u64>,
     pub filter_opened: bool,
@@ -88,6 +90,7 @@ impl App {
             display_items: Vec::new(),
             selectable_indices: Vec::new(),
             kill_session_info: None,
+            foreground_procs: HashMap::new(),
             history: load_history(),
             filter_opened: false,
             pins: load_pins(),
@@ -104,6 +107,11 @@ impl App {
                 self.set_status(format!("Error: {e}"));
             }
         }
+        let pids: Vec<u32> = self.all_sessions
+            .iter()
+            .filter_map(|s| s.pid_name.split('.').next()?.parse().ok())
+            .collect();
+        self.foreground_procs = screen::get_foreground_processes(&pids);
         if let Some(ref dir) = self.workspace_dir {
             self.workspace_tree = Some(workspace::scan_tree(dir));
         }
@@ -746,6 +754,16 @@ impl App {
             .as_secs();
         self.history.insert(name.to_string(), ts);
         save_history(&self.history);
+    }
+
+    /// Return the foreground process name for the session identified by `pid_name`,
+    /// or an empty string if the session is at an idle shell prompt.
+    pub fn session_proc(&self, pid_name: &str) -> &str {
+        let pid: u32 = match pid_name.split('.').next().and_then(|s| s.parse().ok()) {
+            Some(p) => p,
+            None => return "",
+        };
+        self.foreground_procs.get(&pid).map(|s| s.as_str()).unwrap_or("")
     }
 
     /// Format the last-opened time for display, returning None if never opened.

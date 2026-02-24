@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -271,6 +272,87 @@ pub fn create_session(name: &str) -> Result<(), String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("Failed to create session: {}", stderr.trim()))
     }
+}
+
+const SHELL_NAMES: &[&str] = &[
+    "bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "csh",
+];
+
+/// Strip path prefix and login-shell `-` so `/bin/zsh` and `-zsh` both become `zsh`.
+fn comm_base(comm: &str) -> &str {
+    let base = comm.rsplit('/').next().unwrap_or(comm);
+    base.strip_prefix('-').unwrap_or(base)
+}
+
+fn is_shell_or_screen(comm: &str) -> bool {
+    let base = comm_base(comm);
+    base.is_empty() || base == "screen" || SHELL_NAMES.contains(&base)
+}
+
+/// Runs one `ps` call and returns a map from screen session PID → foreground
+/// process name (empty if the session is just sitting at a shell prompt).
+pub fn get_foreground_processes(session_pids: &[u32]) -> HashMap<u32, String> {
+    if session_pids.is_empty() {
+        return HashMap::new();
+    }
+    let output = match Command::new("ps").args(["-axo", "pid=,ppid=,comm="]).output() {
+        Ok(o) => o,
+        Err(_) => return HashMap::new(),
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    let mut names: HashMap<u32, String> = HashMap::new();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+
+    for line in text.lines() {
+        let mut iter = line.split_whitespace();
+        let pid = match iter.next().and_then(|s| s.parse::<u32>().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        let ppid = match iter.next().and_then(|s| s.parse::<u32>().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        let comm = match iter.next() {
+            Some(c) => c.to_string(),
+            None => continue,
+        };
+        names.insert(pid, comm);
+        children.entry(ppid).or_default().push(pid);
+    }
+
+    let mut result: HashMap<u32, String> = HashMap::new();
+    'outer: for &screen_pid in session_pids {
+        // BFS from the screen server, skipping screen/shell nodes, up to 4 levels deep.
+        let mut frontier = vec![screen_pid];
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(screen_pid);
+
+        for _ in 0..4 {
+            let mut next = Vec::new();
+            for pid in frontier {
+                let Some(kids) = children.get(&pid) else { continue };
+                for &kid in kids {
+                    if !visited.insert(kid) {
+                        continue;
+                    }
+                    let comm = names.get(&kid).map(|s| s.as_str()).unwrap_or("");
+                    if is_shell_or_screen(comm) {
+                        next.push(kid);
+                    } else {
+                        result.insert(screen_pid, comm_base(comm).to_string());
+                        continue 'outer;
+                    }
+                }
+            }
+            frontier = next;
+            if frontier.is_empty() {
+                break;
+            }
+        }
+    }
+    result
 }
 
 pub fn create_session_in_dir(name: &str, dir: &std::path::Path) -> Result<(), String> {
