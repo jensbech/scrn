@@ -8,7 +8,7 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use crate::app::{fuzzy_match, App, ListItem, Mode};
-use crate::screen::{format_uptime, SessionState};
+use crate::screen::{format_idle, format_uptime, SessionState};
 
 // ── Palette — ALL explicit Rgb, zero ANSI named colors ─────
 const BASE_BG: Color = Color::Rgb(18, 18, 24);
@@ -39,7 +39,6 @@ const PROC_FG: Color = Color::Rgb(160, 190, 140);
 const VERSION_FG: Color = Color::Rgb(80, 80, 100);
 const COUNT_FG: Color = Color::Rgb(100, 100, 120);
 const SECTION_FG: Color = Color::Rgb(140, 120, 180);
-const CONST_HDR_BG: Color = Color::Rgb(52, 38, 6);
 const CONST_BG: Color = Color::Rgb(28, 21, 5);
 const CONST_ZEBRA_BG: Color = Color::Rgb(38, 29, 7);
 const CONST_FG: Color = Color::Rgb(255, 212, 48);
@@ -184,6 +183,7 @@ fn dim_background(f: &mut Frame) {
 fn draw_table(f: &mut Frame, app: &App, area: Rect) {
     const STATE_W: u16 = 10;
     const UPTIME_W: u16 = 8;
+    const IDLE_W: u16 = 8;
     const DATE_W: u16 = 22;
     const COL_SPACING: u16 = 2;
     const BORDERS: u16 = 2;
@@ -197,7 +197,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         _ => None,
     }).max().unwrap_or(0) as u16;
 
-    let fixed_base = STATE_W + UPTIME_W + DATE_W + (COL_SPACING * 4) + BORDERS + HIGHLIGHT_SYM;
+    let fixed_base = STATE_W + UPTIME_W + IDLE_W + DATE_W + (COL_SPACING * 5) + BORDERS + HIGHLIGHT_SYM;
     let available = area.width.saturating_sub(fixed_base);
     let proc_w = max_proc_chars.min(available.saturating_sub(MIN_NAME_W));
     let name_w = available.saturating_sub(proc_w).max(MIN_NAME_W);
@@ -213,6 +213,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         Cell::from("State"),
         Cell::from("Process"),
         Cell::from("Uptime"),
+        Cell::from("Idle"),
         Cell::from("Last opened"),
     ])
     .style(header_style)
@@ -224,59 +225,41 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         .copied();
 
     let mut selectable_row_idx = 0usize;
-    let mut in_constants = false;
+    let mut in_constants = !app.constants.is_empty();
     let rows: Vec<Row> = app
         .display_items
         .iter()
         .enumerate()
         .map(|(_i, item)| match item {
             ListItem::SectionHeader(title) => {
-                in_constants = title == "Constants";
-                if in_constants {
-                    let full_width_name = format!("  ◆ {title}");
-                    Row::new(vec![
-                        Cell::from(Line::from(Span::styled(
-                            full_width_name,
-                            Style::default()
-                                .fg(CONST_FG)
-                                .bg(CONST_HDR_BG)
-                                .add_modifier(Modifier::BOLD),
-                        ))),
-                        Cell::from(Span::styled("", Style::default().bg(CONST_HDR_BG))),
-                        Cell::from(Span::styled("", Style::default().bg(CONST_HDR_BG))),
-                        Cell::from(Span::styled("", Style::default().bg(CONST_HDR_BG))),
-                        Cell::from(Span::styled("", Style::default().bg(CONST_HDR_BG))),
-                    ])
-                    .style(Style::default().fg(CONST_FG).bg(CONST_HDR_BG))
-                    .top_margin(1)
-                } else {
-                    let full_width_name = format!("  {title}");
-                    Row::new(vec![
-                        Cell::from(Line::from(Span::styled(
-                            full_width_name,
-                            Style::default()
-                                .fg(SECTION_FG)
-                                .bg(BASE_BG)
-                                .add_modifier(Modifier::BOLD | Modifier::DIM),
-                        ))),
-                        Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                        Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                        Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                        Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    ])
-                    .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
-                }
+                let full_width_name = format!("  {title}");
+                Row::new(vec![
+                    Cell::from(Line::from(Span::styled(
+                        full_width_name,
+                        Style::default()
+                            .fg(SECTION_FG)
+                            .bg(BASE_BG)
+                            .add_modifier(Modifier::BOLD | Modifier::DIM),
+                    ))),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                ])
+                .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
             }
             ListItem::Separator => {
                 in_constants = false;
                 let line_char = "\u{2500}"; // ─
-                let total_w = (name_w + STATE_W + proc_w + UPTIME_W + DATE_W + COL_SPACING * 4) as usize;
+                let total_w = (name_w + STATE_W + proc_w + UPTIME_W + IDLE_W + DATE_W + COL_SPACING * 5) as usize;
                 let line_str: String = line_char.repeat(total_w);
                 Row::new(vec![
                     Cell::from(Span::styled(
                         line_str,
                         Style::default().fg(BORDER_FG).bg(BASE_BG),
                     )),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
@@ -304,6 +287,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                 ));
                 Row::new(vec![
                     Cell::from(Line::from(spans)),
+                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
@@ -397,6 +381,11 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     .and_then(|s| s.created.map(format_uptime))
                     .unwrap_or_default();
 
+                let idle_text = session
+                    .as_ref()
+                    .and_then(|s| s.idle_secs.map(format_idle))
+                    .unwrap_or_default();
+
                 let date_text = app
                     .last_opened(name)
                     .unwrap_or_default();
@@ -413,6 +402,10 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     )),
                     Cell::from(Span::styled(
                         uptime_text,
+                        Style::default().fg(DIM).bg(bg),
+                    )),
+                    Cell::from(Span::styled(
+                        idle_text,
                         Style::default().fg(DIM).bg(bg),
                     )),
                     Cell::from(Span::styled(
@@ -502,6 +495,11 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     .map(format_uptime)
                     .unwrap_or_default();
 
+                let idle_text = session
+                    .idle_secs
+                    .map(format_idle)
+                    .unwrap_or_default();
+
                 Row::new(vec![
                     name_cell,
                     Cell::from(Span::styled(
@@ -514,6 +512,10 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
                     )),
                     Cell::from(Span::styled(
                         uptime_text,
+                        Style::default().fg(DIM).bg(bg),
+                    )),
+                    Cell::from(Span::styled(
+                        idle_text,
                         Style::default().fg(DIM).bg(bg),
                     )),
                     Cell::from(Span::styled(
@@ -531,6 +533,7 @@ fn draw_table(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(STATE_W),
         Constraint::Length(proc_w),
         Constraint::Length(UPTIME_W),
+        Constraint::Length(IDLE_W),
         Constraint::Length(DATE_W),
     ];
 

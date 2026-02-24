@@ -491,9 +491,8 @@ impl App {
             orphan_items.clear();
         }
 
-        // Append constants section first
+        // Append constants section first (no header — the gold coloring is enough)
         if !const_items.is_empty() {
-            self.display_items.push(ListItem::SectionHeader("Constants".to_string()));
             let offset = self.display_items.len();
             for idx in const_selectable {
                 self.selectable_indices.push(offset + idx);

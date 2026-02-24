@@ -27,14 +27,10 @@ pub struct Session {
     pub pid_name: String,
     pub state: SessionState,
     pub created: Option<u64>,
+    pub idle_secs: Option<u64>,
 }
 
-pub fn format_uptime(created: u64) -> String {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let secs = now.saturating_sub(created);
+fn format_duration(secs: u64) -> String {
     let mins = secs / 60;
     let hours = mins / 60;
     let days = hours / 24;
@@ -54,6 +50,18 @@ pub fn format_uptime(created: u64) -> String {
     } else {
         "< 1m".to_string()
     }
+}
+
+pub fn format_uptime(created: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format_duration(now.saturating_sub(created))
+}
+
+pub fn format_idle(idle_secs: u64) -> String {
+    format_duration(idle_secs)
 }
 
 /// Returns the path to scrn's managed screenrc, creating it if needed.
@@ -151,6 +159,11 @@ pub fn list_sessions() -> Result<Vec<Session>, String> {
         return Ok(Vec::new());
     }
 
+    let now_secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
     let mut sessions = Vec::new();
 
     for line in text.lines() {
@@ -186,20 +199,32 @@ pub fn list_sessions() -> Result<Vec<Session>, String> {
             SessionState::Detached
         };
 
-        let created = std::env::var("HOME").ok().and_then(|home| {
-            let socket = PathBuf::from(&home).join(".screen").join(pid_name);
-            fs::metadata(&socket)
-                .ok()
-                .and_then(|m| m.created().ok())
-                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-        });
+        let (created, idle_secs) = std::env::var("HOME")
+            .ok()
+            .and_then(|home| {
+                let socket = PathBuf::from(&home).join(".screen").join(pid_name);
+                fs::metadata(&socket).ok().map(|m| {
+                    let created = m
+                        .created()
+                        .ok()
+                        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
+                    let idle = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                        .map(|d| now_secs.saturating_sub(d.as_secs()));
+                    (created, idle)
+                })
+            })
+            .unwrap_or((None, None));
 
         sessions.push(Session {
             name: name.to_string(),
             pid_name: pid_name.to_string(),
             state,
             created,
+            idle_secs,
         });
     }
 
