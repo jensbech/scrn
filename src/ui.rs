@@ -44,7 +44,7 @@ const PIN_BG: Color = Color::Rgb(22, 20, 30);
 const PIN_ZEBRA_BG: Color = Color::Rgb(33, 30, 46);
 const REPO_FG: Color = Color::Rgb(180, 180, 200);
 const NOTE_FG: Color = Color::Rgb(200, 175, 110);
-const BRANCH_FG: Color = Color::Rgb(120, 160, 200);
+const BRANCH_FG: Color = Color::Rgb(90, 90, 108);
 const TREE_GUIDE: Color = Color::Rgb(55, 55, 75);
 
 fn split_at_char_pos(s: &str, pos: usize) -> (&str, &str) {
