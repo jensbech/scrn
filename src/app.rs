@@ -124,7 +124,7 @@ impl App {
             dir_order: load_dir_order(),
             ordering_items: Vec::new(),
             ordering_selected: 0,
-            notes: HashMap::new(),
+            notes: load_notes(),
         }
     }
 
@@ -150,6 +150,13 @@ impl App {
             self.workspace_tree = Some(tree);
         }
         save_sessions(&self.all_sessions, &self.workspace_tree);
+        // Prune notes for sessions that no longer exist.
+        let live: HashSet<String> = self.all_sessions.iter().map(|s| s.name.clone()).collect();
+        let before = self.notes.len();
+        self.notes.retain(|name, _| live.contains(name));
+        if self.notes.len() != before {
+            save_notes(&self.notes);
+        }
         self.apply_search_filter();
     }
 
@@ -834,6 +841,7 @@ impl App {
             } else {
                 self.notes.insert(name, self.create_input.clone());
             }
+            save_notes(&self.notes);
         }
         self.create_input.clear();
         self.cursor_pos = 0;
@@ -1348,6 +1356,39 @@ fn save_dir_order(order: &[String]) {
     let path = dir_order_path();
     let _ = std::fs::create_dir_all(path.parent().unwrap());
     let _ = std::fs::write(&path, order.join("\n") + "\n");
+}
+
+fn notes_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".config").join("scrn").join("notes")
+}
+
+fn load_notes() -> HashMap<String, String> {
+    let path = notes_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    contents
+        .lines()
+        .filter_map(|l| {
+            let (name, note) = l.split_once('\t')?;
+            if name.is_empty() || note.is_empty() { return None; }
+            Some((name.to_string(), note.to_string()))
+        })
+        .collect()
+}
+
+fn save_notes(notes: &HashMap<String, String>) {
+    let path = notes_path();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let mut lines: Vec<String> = notes
+        .iter()
+        .map(|(name, note)| format!("{name}\t{note}"))
+        .collect();
+    lines.sort();
+    let content = if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" };
+    let _ = std::fs::write(&path, content);
 }
 
 fn reorder_tree_children(tree: &mut TreeNode, order: &[String]) {
