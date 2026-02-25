@@ -10,7 +10,6 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use crate::app::{fuzzy_match, App, ListItem, Mode};
-use crate::screen::{format_idle, format_uptime};
 
 // ── Palette — ALL explicit Rgb, zero ANSI named colors ─────
 const BASE_BG: Color = Color::Rgb(18, 18, 24);
@@ -45,6 +44,7 @@ const PIN_BG: Color = Color::Rgb(22, 20, 30);
 const PIN_ZEBRA_BG: Color = Color::Rgb(33, 30, 46);
 const REPO_FG: Color = Color::Rgb(180, 180, 200);
 const NOTE_FG: Color = Color::Rgb(200, 175, 110);
+const BRANCH_FG: Color = Color::Rgb(120, 160, 200);
 const TREE_GUIDE: Color = Color::Rgb(55, 55, 75);
 
 fn split_at_char_pos(s: &str, pos: usize) -> (&str, &str) {
@@ -92,6 +92,18 @@ fn visible_input(input: &str, cursor_pos: usize, max_chars: usize) -> String {
         result.push('\u{2026}');
     }
     result
+}
+
+/// Read the current git branch by parsing .git/HEAD (no subprocess).
+fn git_branch(repo_path: &std::path::Path) -> Option<String> {
+    let head = std::fs::read_to_string(repo_path.join(".git/HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
+        Some(branch.to_string())
+    } else {
+        // Detached HEAD — show short SHA
+        head.get(..7).map(|s| s.to_string())
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -195,9 +207,6 @@ fn dim_background(f: &mut Frame) {
 // ── Main table ──────────────────────────────────────────────
 
 fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
-    const UPTIME_W: u16 = 8;
-    const IDLE_W: u16 = 8;
-    const DATE_W: u16 = 22;
     const NOTE_W: u16 = 28;
     const COL_SPACING: u16 = 2;
     const BORDERS: u16 = 2;
@@ -224,19 +233,43 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         max as u16
     };
 
-    let fixed_base = UPTIME_W + IDLE_W + DATE_W + NOTE_W + (COL_SPACING * 5) + BORDERS + HIGHLIGHT_SYM;
+    // Collect branch names for all visible repo rows.
+    let branch_map: std::collections::HashMap<String, String> = app.display_items.iter()
+        .filter_map(|item| {
+            if let ListItem::TreeRepo { name, path, .. } = item {
+                git_branch(path).map(|b| (name.clone(), b))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let max_branch_chars = branch_map.values()
+        .map(|b| b.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+
+    // fixed_base excludes branch — branch is sized from leftover space (lowest priority).
+    let fixed_base = NOTE_W + (COL_SPACING * 3) + BORDERS + HIGHLIGHT_SYM;
     let available = area.width.saturating_sub(fixed_base);
 
     let (name_w, proc_w) = if max_name_chars + max_proc_chars <= available {
-        // Both fit at content width — columns stay compact regardless of terminal width.
         (max_name_chars, max_proc_chars)
     } else {
-        // Tight — name gets at least half the space.
         let name_priority = (available / 2).max(MIN_NAME_W);
         let pw = max_proc_chars.min(available.saturating_sub(name_priority));
         let nw = available.saturating_sub(pw).max(MIN_NAME_W);
         (nw, pw)
     };
+
+    // Branch gets whatever is left after name + proc + note + their spacings.
+    let used = BORDERS + HIGHLIGHT_SYM + name_w + proc_w + NOTE_W + COL_SPACING * 3;
+    let branch_w = if area.width > used + COL_SPACING {
+        max_branch_chars.min(area.width - used - COL_SPACING)
+    } else {
+        0
+    };
+
     let name_chars = name_w as usize;
 
     let header_style = Style::default()
@@ -244,14 +277,13 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .bg(BASE_BG)
         .add_modifier(Modifier::BOLD);
 
-    let header = Row::new(vec![
+    let mut header_cells = vec![
         Cell::from("Name"),
         Cell::from("Process"),
-        Cell::from("Uptime"),
-        Cell::from("Idle"),
-        Cell::from("Last opened"),
         Cell::from("Note"),
-    ])
+    ];
+    if branch_w > 0 { header_cells.push(Cell::from("Branch")); }
+    let header = Row::new(header_cells)
     .style(header_style)
     .bottom_margin(1);
 
@@ -276,7 +308,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(_i, item)| match item {
             ListItem::SectionHeader(title) => {
                 let full_width_name = format!(" \u{2500} {title}");
-                Row::new(vec![
+                let mut cells = vec![
                     Cell::from(Line::from(Span::styled(
                         full_width_name,
                         Style::default()
@@ -286,29 +318,27 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     ))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                ])
-                .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
+                ];
+                if branch_w > 0 { cells.push(Cell::from(Span::styled("", Style::default().bg(BASE_BG)))); }
+                Row::new(cells).style(Style::default().fg(SECTION_FG).bg(BASE_BG))
             }
             ListItem::Separator => {
                 let line_char = "\u{2500}"; // ─
-                let total_w = (name_w + proc_w + UPTIME_W + IDLE_W + DATE_W + NOTE_W + COL_SPACING * 5) as usize;
+                let branch_extra = if branch_w > 0 { branch_w + COL_SPACING } else { 0 };
+                let total_w = (name_w + proc_w + NOTE_W + COL_SPACING * 2 + branch_extra) as usize;
                 let line_str: String = line_char.repeat(total_w);
-                Row::new(vec![
+                let mut cells = vec![
                     Cell::from(Span::styled(
                         line_str,
                         Style::default().fg(BORDER_FG).bg(BASE_BG),
                     )),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                ])
-                .style(Style::default().fg(BORDER_FG).bg(BASE_BG))
-                .bottom_margin(1)
+                ];
+                if branch_w > 0 { cells.push(Cell::from(Span::styled("", Style::default().bg(BASE_BG)))); }
+                Row::new(cells)
+                    .style(Style::default().fg(BORDER_FG).bg(BASE_BG))
+                    .bottom_margin(1)
             }
             ListItem::TreeDir { name, prefix, .. } => {
                 let mut spans = vec![
@@ -327,15 +357,13 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                         .bg(BASE_BG)
                         .add_modifier(Modifier::DIM),
                 ));
-                Row::new(vec![
+                let mut cells = vec![
                     Cell::from(Line::from(spans)),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                ])
-                .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
+                ];
+                if branch_w > 0 { cells.push(Cell::from(Span::styled("", Style::default().bg(BASE_BG)))); }
+                Row::new(cells).style(Style::default().fg(SECTION_FG).bg(BASE_BG))
             }
             ListItem::TreeRepo {
                 name,
@@ -413,20 +441,6 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     proc_w as usize,
                 );
 
-                let uptime_text = session
-                    .as_ref()
-                    .and_then(|s| s.created.map(format_uptime))
-                    .unwrap_or_default();
-
-                let idle_text = session
-                    .as_ref()
-                    .and_then(|s| s.idle_secs.map(format_idle))
-                    .unwrap_or_default();
-
-                let date_text = app
-                    .last_opened(name)
-                    .unwrap_or_default();
-
                 let proc_cell = if proc_text.is_empty() {
                     Cell::from(Span::styled("\u{2500}", Style::default().fg(DIM).bg(bg)))
                 } else {
@@ -437,15 +451,18 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     .map(|n| truncate(n, NOTE_W as usize))
                     .unwrap_or_default();
 
-                Row::new(vec![
+                let mut cells = vec![
                     name_cell,
                     proc_cell,
-                    Cell::from(Span::styled(uptime_text, Style::default().fg(DIM).bg(bg))),
-                    Cell::from(Span::styled(idle_text, Style::default().fg(DIM).bg(bg))),
-                    Cell::from(Span::styled(date_text, Style::default().fg(DIM).bg(bg))),
                     Cell::from(Span::styled(note_text, Style::default().fg(NOTE_FG).bg(bg))),
-                ])
-                .style(Style::default().fg(FG).bg(bg))
+                ];
+                if branch_w > 0 {
+                    let branch_text = branch_map.get(name)
+                        .map(|b| truncate(b, branch_w as usize))
+                        .unwrap_or_default();
+                    cells.push(Cell::from(Span::styled(branch_text, Style::default().fg(BRANCH_FG).bg(bg))));
+                }
+                Row::new(cells).style(Style::default().fg(FG).bg(bg))
             }
             ListItem::SessionItem(session) => {
                 let is_current = app.is_current_session(session);
@@ -531,16 +548,6 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
                 let proc_text = truncate(app.session_proc(&session.pid_name), proc_w as usize);
 
-                let uptime_text = session
-                    .created
-                    .map(format_uptime)
-                    .unwrap_or_default();
-
-                let idle_text = session
-                    .idle_secs
-                    .map(format_idle)
-                    .unwrap_or_default();
-
                 let proc_cell = if proc_text.is_empty() {
                     Cell::from(Span::styled("\u{2500}", Style::default().fg(DIM).bg(bg)))
                 } else {
@@ -551,30 +558,25 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     .map(|n| truncate(n, NOTE_W as usize))
                     .unwrap_or_default();
 
-                Row::new(vec![
+                let mut cells = vec![
                     name_cell,
                     proc_cell,
-                    Cell::from(Span::styled(uptime_text, Style::default().fg(DIM).bg(bg))),
-                    Cell::from(Span::styled(idle_text, Style::default().fg(DIM).bg(bg))),
-                    Cell::from(Span::styled(
-                        app.last_opened(&session.name).unwrap_or_default(),
-                        Style::default().fg(DIM).bg(bg),
-                    )),
                     Cell::from(Span::styled(note_text, Style::default().fg(NOTE_FG).bg(bg))),
-                ])
-                .style(Style::default().fg(FG).bg(bg))
+                ];
+                if branch_w > 0 {
+                    cells.push(Cell::from(Span::styled("", Style::default().bg(bg))));
+                }
+                Row::new(cells).style(Style::default().fg(FG).bg(bg))
             }
         })
         .collect();
 
-    let widths = [
+    let mut widths_vec = vec![
         Constraint::Length(name_w),
         Constraint::Length(proc_w),
-        Constraint::Length(UPTIME_W),
-        Constraint::Length(IDLE_W),
-        Constraint::Length(DATE_W),
         Constraint::Length(NOTE_W),
     ];
+    if branch_w > 0 { widths_vec.push(Constraint::Length(branch_w)); }
 
     let mut block = Block::default()
         .borders(Borders::ALL)
@@ -652,14 +654,14 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(DIM).bg(BASE_BG),
         ))])
         .style(Style::default().fg(DIM).bg(BASE_BG))];
-        let table = Table::new(empty_rows, widths)
+        let table = Table::new(empty_rows, widths_vec)
             .header(header)
             .block(block)
             .style(Style::default().fg(FG).bg(BASE_BG))
             .column_spacing(COL_SPACING);
         f.render_widget(table, area);
     } else {
-        let table = Table::new(rows, widths)
+        let table = Table::new(rows, widths_vec)
             .header(header)
             .block(block)
             .style(Style::default().fg(FG).bg(BASE_BG))
@@ -1167,7 +1169,7 @@ fn draw_note_modal(f: &mut Frame, app: &App) {
 
 // ── Directory order modal ────────────────────────────────────
 
-fn draw_ordering_modal(f: &mut Frame, app: &crate::app::App) {
+fn draw_ordering_modal(f: &mut Frame, app: &App) {
     let area = f.area();
     let n = app.ordering_items.len() as u16;
     let height = (n + 2).min(area.height.saturating_sub(4));

@@ -19,42 +19,10 @@ pub struct Session {
     pub pid_name: String,
     #[allow(dead_code)]
     pub state: SessionState,
+    #[allow(dead_code)]
     pub created: Option<u64>,
+    #[allow(dead_code)]
     pub idle_secs: Option<u64>,
-}
-
-fn format_duration(secs: u64) -> String {
-    let mins = secs / 60;
-    let hours = mins / 60;
-    let days = hours / 24;
-    let weeks = days / 7;
-    let months = days / 30;
-
-    if months > 0 {
-        format!("{}mo", months)
-    } else if weeks > 0 {
-        format!("{}w", weeks)
-    } else if days > 0 {
-        format!("{}d", days)
-    } else if hours > 0 {
-        format!("{}h", hours)
-    } else if mins > 0 {
-        format!("{}m", mins)
-    } else {
-        "< 1m".to_string()
-    }
-}
-
-pub fn format_uptime(created: u64) -> String {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format_duration(now.saturating_sub(created))
-}
-
-pub fn format_idle(idle_secs: u64) -> String {
-    format_duration(idle_secs)
 }
 
 /// Returns the path to scrn's managed screenrc, creating it if needed.

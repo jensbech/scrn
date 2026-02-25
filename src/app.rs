@@ -992,15 +992,6 @@ impl App {
         self.foreground_procs.get(&pid).map(|s| s.as_str()).unwrap_or("")
     }
 
-    /// Format the last-opened time for display, returning None if never opened.
-    pub fn last_opened(&self, name: &str) -> Option<String> {
-        let ts = *self.history.get(name)?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Some(format_relative(now, ts))
-    }
 
 }
 
@@ -1402,25 +1393,6 @@ fn reorder_tree_children(tree: &mut TreeNode, order: &[String]) {
     });
 }
 
-fn format_relative(now: u64, ts: u64) -> String {
-    let delta = now.saturating_sub(ts);
-    if delta < 60 {
-        "just now".to_string()
-    } else if delta < 3600 {
-        let m = delta / 60;
-        if m == 1 { "1 min ago".to_string() } else { format!("{m} mins ago") }
-    } else if delta < 86400 {
-        let h = delta / 3600;
-        if h == 1 { "1 hour ago".to_string() } else { format!("{h} hours ago") }
-    } else if delta < 86400 * 30 {
-        let d = delta / 86400;
-        if d == 1 { "1 day ago".to_string() } else { format!("{d} days ago") }
-    } else {
-        let d = delta / 86400;
-        let m = d / 30;
-        if m == 1 { "1 month ago".to_string() } else { format!("{m} months ago") }
-    }
-}
 
 fn generate_throwaway_name(all_sessions: &[Session]) -> String {
     const ADJS: &[&str] = &[
