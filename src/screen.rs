@@ -12,14 +12,6 @@ pub enum SessionState {
     Detached,
 }
 
-impl SessionState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            SessionState::Attached => "Attached",
-            SessionState::Detached => "Detached",
-        }
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct Session {

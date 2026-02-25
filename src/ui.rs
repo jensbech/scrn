@@ -29,7 +29,6 @@ const MODAL_BORDER: Color = Color::Rgb(80, 80, 110);
 const MODAL_TITLE: Color = Color::Rgb(180, 180, 200);
 const BORDER_FG: Color = Color::Rgb(60, 60, 80);
 const HEADER_FG: Color = Color::Rgb(180, 180, 200);
-const HELP_FG: Color = Color::Rgb(120, 120, 140);
 const STATUS_OK: Color = Color::Rgb(140, 220, 140);
 const STATUS_ERR: Color = Color::Rgb(220, 140, 140);
 const KILL_BORDER: Color = Color::Rgb(200, 80, 80);
@@ -41,9 +40,8 @@ const PROC_FG: Color = Color::Rgb(160, 190, 140);
 const VERSION_FG: Color = Color::Rgb(80, 80, 100);
 const COUNT_FG: Color = Color::Rgb(100, 100, 120);
 const SECTION_FG: Color = Color::Rgb(140, 120, 180);
-const CONST_BG: Color = Color::Rgb(28, 21, 5);
-const CONST_ZEBRA_BG: Color = Color::Rgb(38, 29, 7);
-const CONST_FG: Color = Color::Rgb(255, 212, 48);
+const CONST_BG: Color = Color::Rgb(35, 16, 24);
+const CONST_ZEBRA_BG: Color = Color::Rgb(48, 22, 33);
 const REPO_FG: Color = Color::Rgb(180, 180, 200);
 const TREE_GUIDE: Color = Color::Rgb(55, 55, 75);
 
@@ -200,17 +198,39 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     const HIGHLIGHT_SYM: u16 = 2;
     const MIN_NAME_W: u16 = 10;
 
-    // Size the process column to the widest actual value; give the name column what's left.
+    // Measure widest actual process text and session name to size columns to content.
     let max_proc_chars = app.display_items.iter().filter_map(|item| match item {
         ListItem::SessionItem(s) => Some(app.session_proc(&s.pid_name).chars().count()),
         ListItem::TreeRepo { session: Some(s), .. } => Some(app.session_proc(&s.pid_name).chars().count()),
         _ => None,
     }).max().unwrap_or(0) as u16;
 
+    let max_name_chars = {
+        let mut max = MIN_NAME_W as usize;
+        for item in &app.display_items {
+            let n = match item {
+                ListItem::SessionItem(s) => s.name.chars().count() + 3, // widest prefix " ↳ "
+                ListItem::TreeRepo { name, prefix, .. } => name.chars().count() + 2 + prefix.chars().count(),
+                _ => continue,
+            };
+            if n > max { max = n; }
+        }
+        max as u16
+    };
+
     let fixed_base = STATE_W + UPTIME_W + IDLE_W + DATE_W + (COL_SPACING * 5) + BORDERS + HIGHLIGHT_SYM;
     let available = area.width.saturating_sub(fixed_base);
-    let proc_w = max_proc_chars.min(available.saturating_sub(MIN_NAME_W));
-    let name_w = available.saturating_sub(proc_w).max(MIN_NAME_W);
+
+    let (name_w, proc_w) = if max_name_chars + max_proc_chars <= available {
+        // Both fit at content width — columns stay compact regardless of terminal width.
+        (max_name_chars, max_proc_chars)
+    } else {
+        // Tight — name gets at least half the space.
+        let name_priority = (available / 2).max(MIN_NAME_W);
+        let pw = max_proc_chars.min(available.saturating_sub(name_priority));
+        let nw = available.saturating_sub(pw).max(MIN_NAME_W);
+        (nw, pw)
+    };
     let name_chars = name_w as usize;
 
     let header_style = Style::default()
@@ -243,7 +263,6 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     let mut name_seen: HashMap<String, usize> = HashMap::new();
 
     let mut selectable_row_idx = 0usize;
-    let mut in_constants = !app.constants.is_empty();
     let rows: Vec<Row> = app
         .display_items
         .iter()
@@ -268,7 +287,6 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 .style(Style::default().fg(SECTION_FG).bg(BASE_BG))
             }
             ListItem::Separator => {
-                in_constants = false;
                 let line_char = "\u{2500}"; // ─
                 let total_w = (name_w + STATE_W + proc_w + UPTIME_W + IDLE_W + DATE_W + COL_SPACING * 5) as usize;
                 let line_str: String = line_char.repeat(total_w);
@@ -320,7 +338,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 prefix,
                 ..
             } => {
-                let bg = if in_constants {
+                let bg = if app.constants.contains(name) {
                     if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
                 } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
@@ -391,10 +409,10 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(Span::styled("", Style::default().bg(bg)))
                 };
 
-                let proc_text = session
-                    .as_ref()
-                    .map(|s| app.session_proc(&s.pid_name).to_string())
-                    .unwrap_or_default();
+                let proc_text = truncate(
+                    &session.as_ref().map(|s| app.session_proc(&s.pid_name).to_string()).unwrap_or_default(),
+                    proc_w as usize,
+                );
 
                 let uptime_text = session
                     .as_ref()
@@ -444,7 +462,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     SessionState::Attached => YELLOW,
                 };
 
-                let bg = if in_constants {
+                let bg = if app.constants.contains(&session.name) {
                     if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
                 } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
@@ -520,7 +538,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(Line::from(spans))
                 };
 
-                let proc_text = app.session_proc(&session.pid_name).to_string();
+                let proc_text = truncate(app.session_proc(&session.pid_name), proc_w as usize);
 
                 let uptime_text = session
                     .created
@@ -564,7 +582,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let widths = [
-        Constraint::Min(name_w),
+        Constraint::Length(name_w),
         Constraint::Length(STATE_W),
         Constraint::Length(proc_w),
         Constraint::Length(UPTIME_W),
