@@ -227,10 +227,12 @@ fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
                         }
                         KeyCode::Char('r') => app.refresh_sessions(),
                         KeyCode::Char('t') => app.create_throwaway(),
+                        KeyCode::Char('d') => app.duplicate_session(),
+                        KeyCode::Char('O') => app.start_ordering(),
                         _ => {}
                     },
                     Mode::Searching => match key.code {
-                        KeyCode::Esc => app.clear_search(),
+                        KeyCode::Esc => app.confirm_search(),
                         KeyCode::Enter => {
                             app.confirm_search();
                             app.select_for_attach();
@@ -321,6 +323,33 @@ fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
                         KeyCode::Char('n') | KeyCode::Esc => {
                             app.mode = Mode::Normal;
                         }
+                        _ => {}
+                    },
+                    Mode::Ordering => match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if app.ordering_selected + 1 < app.ordering_items.len() {
+                                app.ordering_selected += 1;
+                            }
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            if app.ordering_selected > 0 {
+                                app.ordering_selected -= 1;
+                            }
+                        }
+                        KeyCode::Char('J') => {
+                            if app.ordering_selected + 1 < app.ordering_items.len() {
+                                app.ordering_items.swap(app.ordering_selected, app.ordering_selected + 1);
+                                app.ordering_selected += 1;
+                            }
+                        }
+                        KeyCode::Char('K') => {
+                            if app.ordering_selected > 0 {
+                                app.ordering_items.swap(app.ordering_selected, app.ordering_selected - 1);
+                                app.ordering_selected -= 1;
+                            }
+                        }
+                        KeyCode::Enter => app.confirm_ordering(),
+                        KeyCode::Esc => app.cancel_ordering(),
                         _ => {}
                     },
                 },

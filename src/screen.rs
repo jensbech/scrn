@@ -400,6 +400,86 @@ pub fn get_foreground_processes(session_pids: &[u32]) -> HashMap<u32, String> {
     result
 }
 
+fn get_process_cwd(pid: u32) -> Option<PathBuf> {
+    // Linux: /proc/<pid>/cwd symlink
+    let proc_cwd = PathBuf::from(format!("/proc/{pid}/cwd"));
+    if let Ok(path) = fs::read_link(&proc_cwd) {
+        return Some(path);
+    }
+
+    // macOS: lsof -p <pid> -a -d cwd -Fn
+    let output = Command::new("lsof")
+        .args(["-p", &pid.to_string(), "-a", "-d", "cwd", "-Fn"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        if let Some(path) = line.strip_prefix('n') {
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+    None
+}
+
+/// Returns the current working directory of the shell inside the given screen session.
+pub fn get_session_cwd(pid_name: &str) -> Option<PathBuf> {
+    let screen_pid: u32 = pid_name.split('.').next()?.parse().ok()?;
+
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,args="])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut args_map: HashMap<u32, String> = HashMap::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some((pid_str, rest)) = trimmed.split_once(|c: char| c.is_ascii_whitespace()) else { continue };
+        let rest = rest.trim_start();
+        let Some((ppid_str, args_str)) = rest.split_once(|c: char| c.is_ascii_whitespace()) else { continue };
+        let Some(pid) = pid_str.parse::<u32>().ok() else { continue };
+        let Some(ppid) = ppid_str.parse::<u32>().ok() else { continue };
+        args_map.insert(pid, args_str.trim_start().to_string());
+        children.entry(ppid).or_default().push(pid);
+    }
+
+    // BFS through shell/screen children to find the innermost shell
+    let mut frontier = vec![screen_pid];
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(screen_pid);
+
+    for _ in 0..4 {
+        let mut next = Vec::new();
+        for &pid in &frontier {
+            let Some(kids) = children.get(&pid) else { continue };
+            for &kid in kids {
+                if !visited.insert(kid) {
+                    continue;
+                }
+                let args = args_map.get(&kid).map(|s| s.as_str()).unwrap_or("");
+                if is_shell_or_screen(args) {
+                    next.push(kid);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+
+    for pid in frontier {
+        if let Some(cwd) = get_process_cwd(pid) {
+            return Some(cwd);
+        }
+    }
+    None
+}
+
 pub fn create_session_in_dir(name: &str, dir: &std::path::Path) -> Result<(), String> {
     let rc = ensure_screenrc();
     let output = Command::new("screen")

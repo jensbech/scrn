@@ -166,6 +166,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             dim_background(f);
             draw_quit_modal(f);
         }
+        Mode::Ordering => {
+            dim_background(f);
+            draw_ordering_modal(f, app);
+        }
         _ => {}
     }
 
@@ -312,6 +316,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             ListItem::TreeRepo {
                 name,
                 session,
+                companion,
                 prefix,
                 ..
             } => {
@@ -375,14 +380,15 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(Line::from(spans))
                 };
 
-                let (state_text, state_color) = if let Some(ref s) = session {
+                let _ = companion; // companion is shown as a separate selectable row below
+                let state_cell = if let Some(ref s) = session {
                     let color = match s.state {
                         SessionState::Detached => GREEN,
                         SessionState::Attached => YELLOW,
                     };
-                    ("\u{25cf}".to_string(), color)
+                    Cell::from(Span::styled("\u{25cf}", Style::default().fg(color).bg(bg)))
                 } else {
-                    (String::new(), DIM)
+                    Cell::from(Span::styled("", Style::default().bg(bg)))
                 };
 
                 let proc_text = session
@@ -412,10 +418,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
                 Row::new(vec![
                     name_cell,
-                    Cell::from(Span::styled(
-                        state_text,
-                        Style::default().fg(state_color).bg(bg),
-                    )),
+                    state_cell,
                     proc_cell,
                     Cell::from(Span::styled(
                         uptime_text,
@@ -445,8 +448,9 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
                 } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
+                let is_companion = !is_current && !is_throwaway && session.name.ends_with("-2");
                 let name_fg = if is_current { ACCENT } else if is_throwaway { DIM } else { GREEN };
-                let prefix = if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else { "  " };
+                let prefix = if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else if is_companion { " \u{21b3} " } else { "  " };
                 let avail = name_chars.saturating_sub(prefix.chars().count());
                 let display_name = if name_counts.get(&session.name).copied().unwrap_or(0) > 1 {
                     let seen = name_seen.entry(session.name.clone()).or_insert(0);
@@ -590,9 +594,12 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Bottom border: key hints, status message, and/or filter indicator
     let mut bottom_left_spans: Vec<Span> = Vec::new();
 
-    let hints: &[(&str, &str)] = &[
-        ("Enter","Attach"), ("c","Create"), ("t","Throwaway"), ("n","Rename"), ("x","Kill"), ("p","Pin"), ("C","Constant"), ("/","Search"), ("q","Quit"),
+    let mut hints: Vec<(&str, &str)> = vec![
+        ("Enter","Attach"), ("c","Create"), ("t","Throwaway"), ("d","Duplicate"), ("n","Rename"), ("x","Kill"), ("p","Pin"), ("C","Constant"), ("/","Search"), ("q","Quit"),
     ];
+    if app.workspace_tree.as_ref().is_some_and(|t| t.children.iter().any(|c| !c.is_repo)) {
+        hints.push(("O", "Order"));
+    }
     for (i, (key, desc)) in hints.iter().enumerate() {
         if i > 0 {
             bottom_left_spans.push(Span::styled(" ", Style::default().fg(DIM).bg(BASE_BG)));
@@ -660,7 +667,18 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             )
             .highlight_symbol("\u{2588} ");
 
+        // borders(2) + header(1) + header bottom_margin(1) = 4
+        let visible_rows = area.height.saturating_sub(4) as usize;
+
         let mut state = TableState::default();
+        if let Some(sel_row) = selected_visual_row {
+            let total_rows = app.display_items.len();
+            let half = visible_rows / 2;
+            let offset = sel_row
+                .saturating_sub(half)
+                .min(total_rows.saturating_sub(visible_rows));
+            *state.offset_mut() = offset;
+        }
         state.select(selected_visual_row);
 
         f.render_stateful_widget(table, area, &mut state);
@@ -670,7 +688,6 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         app.table_scroll_offset = state.offset();
 
         // Scrollbar
-        let visible_rows = area.height.saturating_sub(4) as usize; // borders + header + header margin
         if app.selectable_indices.len() > visible_rows {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
@@ -1091,6 +1108,58 @@ fn draw_quit_modal(f: &mut Frame) {
             Style::default().fg(DIM).bg(MODAL_BG),
         )),
     ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
+        inner,
+    );
+}
+
+// ── Directory order modal ────────────────────────────────────
+
+fn draw_ordering_modal(f: &mut Frame, app: &crate::app::App) {
+    let area = f.area();
+    let n = app.ordering_items.len() as u16;
+    let height = (n + 2).min(area.height.saturating_sub(4));
+    let width = app.ordering_items.iter()
+        .map(|s| s.chars().count() as u16)
+        .max()
+        .unwrap_or(20)
+        .max(28)
+        .saturating_add(6)
+        .min(area.width.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            " Order Directories ",
+            Style::default().fg(MODAL_TITLE).bg(MODAL_BG).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from(Span::styled(
+            " K\u{2191} J\u{2193} move  Enter save  Esc cancel ",
+            Style::default().fg(DIM).bg(MODAL_BG),
+        )));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let lines: Vec<Line> = app.ordering_items.iter().enumerate().map(|(i, name)| {
+        let selected = i == app.ordering_selected;
+        let bg = if selected { HIGHLIGHT_BG } else { MODAL_BG };
+        let fg = if selected { FG_BRIGHT } else { FG };
+        let prefix = if selected { " \u{2588} " } else { "   " };
+        Line::from(vec![
+            Span::styled(prefix, Style::default().fg(ACCENT).bg(bg)),
+            Span::styled(name.clone(), Style::default().fg(fg).bg(bg)),
+        ])
+    }).collect();
 
     f.render_widget(
         Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),

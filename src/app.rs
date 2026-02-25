@@ -17,6 +17,7 @@ pub enum Mode {
     ConfirmKillAll1,
     ConfirmKillAll2,
     ConfirmQuit,
+    Ordering,
 }
 
 pub enum Action {
@@ -39,6 +40,7 @@ pub enum ListItem {
         name: String,
         path: PathBuf,
         session: Option<Session>,
+        companion: Option<Session>,
         prefix: String,
     },
 }
@@ -78,6 +80,9 @@ pub struct App {
     pub table_data_end_y: u16,
     pub table_scroll_offset: usize,
     pub last_click: Option<(Instant, usize)>,
+    pub dir_order: Vec<String>,
+    pub ordering_items: Vec<String>,
+    pub ordering_selected: usize,
 }
 
 impl App {
@@ -113,6 +118,9 @@ impl App {
             table_data_end_y: 0,
             table_scroll_offset: 0,
             last_click: None,
+            dir_order: load_dir_order(),
+            ordering_items: Vec::new(),
+            ordering_selected: 0,
         }
     }
 
@@ -131,7 +139,11 @@ impl App {
             .collect();
         self.foreground_procs = screen::get_foreground_processes(&pids);
         if let Some(ref dir) = self.workspace_dir {
-            self.workspace_tree = Some(workspace::scan_tree(dir));
+            let mut tree = workspace::scan_tree(dir);
+            if !self.dir_order.is_empty() {
+                reorder_tree_children(&mut tree, &self.dir_order);
+            }
+            self.workspace_tree = Some(tree);
         }
         save_sessions(&self.all_sessions, &self.workspace_tree);
         self.apply_search_filter();
@@ -354,13 +366,10 @@ impl App {
             }
         }
 
-        // Orphan sessions: not merged into any tree repo, and not a *-2 pane session
+        // Orphan sessions: not merged into any tree repo
         let mut all_orphan_sessions: Vec<&Session> = sessions_clone
             .iter()
-            .filter(|s| {
-                !merged_sessions.contains(&s.name)
-                    && !s.name.ends_with("-2")
-            })
+            .filter(|s| !merged_sessions.contains(&s.name))
             .collect();
 
         // Sort by fuzzy match score when searching
@@ -727,6 +736,76 @@ impl App {
         self.action = Action::Create(name, Some(PathBuf::from(home)));
     }
 
+    pub fn duplicate_session(&mut self) {
+        let item = match self.selected_display_item() {
+            Some(item) => item.clone(),
+            None => return,
+        };
+        match item {
+            ListItem::TreeRepo { name, path, .. } => {
+                let dup_name = format!("{name}-2");
+                if let Some(existing) = self.all_sessions.iter()
+                    .find(|s| s.name == dup_name && !self.is_current_session(s))
+                    .cloned()
+                {
+                    self.record_opened(&dup_name);
+                    self.action = Action::Attach(existing.pid_name);
+                } else if !self.all_sessions.iter().any(|s| s.name == dup_name) {
+                    self.record_opened(&dup_name);
+                    self.action = Action::Create(dup_name, Some(path));
+                }
+            }
+            ListItem::SessionItem(session) => {
+                let base = session.name.strip_suffix("-2").unwrap_or(&session.name).to_string();
+                let dup_name = format!("{base}-2");
+                if let Some(existing) = self.all_sessions.iter()
+                    .find(|s| s.name == dup_name && !self.is_current_session(s))
+                    .cloned()
+                {
+                    self.record_opened(&dup_name);
+                    self.action = Action::Attach(existing.pid_name);
+                } else if !self.all_sessions.iter().any(|s| s.name == dup_name) {
+                    if let Some(cwd) = screen::get_session_cwd(&session.pid_name) {
+                        self.record_opened(&dup_name);
+                        self.action = Action::Create(dup_name, Some(cwd));
+                    } else {
+                        self.set_status("Could not determine session directory".to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn start_ordering(&mut self) {
+        if let Some(ref tree) = self.workspace_tree {
+            let dirs: Vec<String> = tree.children.iter()
+                .filter(|c| !c.is_repo)
+                .map(|c| c.name.clone())
+                .collect();
+            if dirs.is_empty() {
+                return;
+            }
+            self.ordering_items = dirs;
+            self.ordering_selected = 0;
+            self.mode = Mode::Ordering;
+        }
+    }
+
+    pub fn confirm_ordering(&mut self) {
+        self.dir_order = self.ordering_items.clone();
+        save_dir_order(&self.dir_order);
+        if let Some(ref mut tree) = self.workspace_tree {
+            reorder_tree_children(tree, &self.dir_order);
+        }
+        self.rebuild_display_list();
+        self.mode = Mode::Normal;
+    }
+
+    pub fn cancel_ordering(&mut self) {
+        self.mode = Mode::Normal;
+    }
+
     pub fn kill_all_throwaway(&mut self) {
         let throwaway: Vec<String> = self.all_sessions
             .iter()
@@ -922,19 +1001,27 @@ fn flatten_tree(
             if let Some(ref s) = session {
                 merged.insert(s.name.clone());
             }
-            let companion = format!("{}-2", child.name);
-            if session_map.contains_key(companion.as_str()) {
-                merged.insert(companion);
+            let companion_name = format!("{}-2", child.name);
+            let companion = session_map.get(companion_name.as_str()).cloned().cloned();
+            if companion.is_some() {
+                merged.insert(companion_name);
             }
 
+            let companion_row = companion.clone();
             let idx = display_items.len();
             display_items.push(ListItem::TreeRepo {
                 name: child.name.clone(),
                 path: child.path.clone(),
                 session,
+                companion,
                 prefix: " ".to_string(),
             });
             selectable_indices.push(idx);
+            if let Some(companion_session) = companion_row {
+                let cidx = display_items.len();
+                display_items.push(ListItem::SessionItem(companion_session));
+                selectable_indices.push(cidx);
+            }
         } else {
             let (compact_name, leaf) = compact_dir_chain(child);
             let full_name = if dir_prefix.is_empty() {
@@ -997,19 +1084,27 @@ fn flatten_filtered(
             if let Some(ref s) = session {
                 merged.insert(s.name.clone());
             }
-            let companion = format!("{}-2", child.name);
-            if session_map.contains_key(companion.as_str()) {
-                merged.insert(companion);
+            let companion_name = format!("{}-2", child.name);
+            let companion = session_map.get(companion_name.as_str()).cloned().cloned();
+            if companion.is_some() {
+                merged.insert(companion_name);
             }
 
+            let companion_row = companion.clone();
             let idx = display_items.len();
             display_items.push(ListItem::TreeRepo {
                 name: child.name.clone(),
                 path: child.path.clone(),
                 session,
+                companion,
                 prefix: " ".to_string(),
             });
             selectable_indices.push(idx);
+            if let Some(companion_session) = companion_row {
+                let cidx = display_items.len();
+                display_items.push(ListItem::SessionItem(companion_session));
+                selectable_indices.push(cidx);
+            }
         } else {
             let (compact_name, leaf) = compact_dir_chain(child);
             let full_name = if dir_prefix.is_empty() {
@@ -1193,6 +1288,37 @@ fn load_saved_sessions() -> Vec<(String, Option<PathBuf>)> {
             }
         })
         .collect()
+}
+
+fn dir_order_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".config").join("scrn").join("dir_order")
+}
+
+fn load_dir_order() -> Vec<String> {
+    let path = dir_order_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    contents.lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect()
+}
+
+fn save_dir_order(order: &[String]) {
+    let path = dir_order_path();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let _ = std::fs::write(&path, order.join("\n") + "\n");
+}
+
+fn reorder_tree_children(tree: &mut TreeNode, order: &[String]) {
+    let order_map: HashMap<&str, usize> = order.iter().enumerate()
+        .map(|(i, name)| (name.as_str(), i))
+        .collect();
+    tree.children.sort_by(|a, b| {
+        let pa = order_map.get(a.name.as_str()).copied().unwrap_or(usize::MAX);
+        let pb = order_map.get(b.name.as_str()).copied().unwrap_or(usize::MAX);
+        pa.cmp(&pb).then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
 }
 
 fn format_relative(now: u64, ts: u64) -> String {
