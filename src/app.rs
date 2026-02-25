@@ -18,6 +18,7 @@ pub enum Mode {
     ConfirmKillAll2,
     ConfirmQuit,
     Ordering,
+    EditingNote,
 }
 
 pub enum Action {
@@ -83,6 +84,8 @@ pub struct App {
     pub dir_order: Vec<String>,
     pub ordering_items: Vec<String>,
     pub ordering_selected: usize,
+    /// in-memory notes per item name, not persisted to disk
+    pub notes: HashMap<String, String>,
 }
 
 impl App {
@@ -121,6 +124,7 @@ impl App {
             dir_order: load_dir_order(),
             ordering_items: Vec::new(),
             ordering_selected: 0,
+            notes: HashMap::new(),
         }
     }
 
@@ -803,6 +807,42 @@ impl App {
     }
 
     pub fn cancel_ordering(&mut self) {
+        self.mode = Mode::Normal;
+    }
+
+    pub fn selected_item_name(&self) -> Option<String> {
+        let visual_idx = *self.selectable_indices.get(self.selected)?;
+        match self.display_items.get(visual_idx)? {
+            ListItem::TreeRepo { name, .. } => Some(name.clone()),
+            ListItem::SessionItem(s) => Some(s.name.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn start_note_edit(&mut self) {
+        if let Some(name) = self.selected_item_name() {
+            self.create_input = self.notes.get(&name).cloned().unwrap_or_default();
+            self.cursor_pos = self.create_input.chars().count();
+            self.mode = Mode::EditingNote;
+        }
+    }
+
+    pub fn confirm_note(&mut self) {
+        if let Some(name) = self.selected_item_name() {
+            if self.create_input.is_empty() {
+                self.notes.remove(&name);
+            } else {
+                self.notes.insert(name, self.create_input.clone());
+            }
+        }
+        self.create_input.clear();
+        self.cursor_pos = 0;
+        self.mode = Mode::Normal;
+    }
+
+    pub fn cancel_note(&mut self) {
+        self.create_input.clear();
+        self.cursor_pos = 0;
         self.mode = Mode::Normal;
     }
 

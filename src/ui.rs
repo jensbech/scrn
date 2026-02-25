@@ -10,7 +10,7 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use crate::app::{fuzzy_match, App, ListItem, Mode};
-use crate::screen::{format_idle, format_uptime, SessionState};
+use crate::screen::{format_idle, format_uptime};
 
 // ── Palette — ALL explicit Rgb, zero ANSI named colors ─────
 const BASE_BG: Color = Color::Rgb(18, 18, 24);
@@ -21,7 +21,6 @@ const ACCENT: Color = Color::Rgb(180, 180, 255);
 const FG: Color = Color::Rgb(220, 220, 230);
 const FG_BRIGHT: Color = Color::Rgb(255, 255, 255);
 const GREEN: Color = Color::Rgb(80, 200, 120);
-const YELLOW: Color = Color::Rgb(220, 200, 80);
 const MATCH_FG: Color = Color::Rgb(255, 200, 60);
 const SEARCH_BG: Color = Color::Rgb(25, 25, 35);
 const MODAL_BG: Color = Color::Rgb(20, 20, 30);
@@ -42,7 +41,10 @@ const COUNT_FG: Color = Color::Rgb(100, 100, 120);
 const SECTION_FG: Color = Color::Rgb(140, 120, 180);
 const CONST_BG: Color = Color::Rgb(35, 16, 24);
 const CONST_ZEBRA_BG: Color = Color::Rgb(48, 22, 33);
+const PIN_BG: Color = Color::Rgb(22, 20, 30);
+const PIN_ZEBRA_BG: Color = Color::Rgb(33, 30, 46);
 const REPO_FG: Color = Color::Rgb(180, 180, 200);
+const NOTE_FG: Color = Color::Rgb(200, 175, 110);
 const TREE_GUIDE: Color = Color::Rgb(55, 55, 75);
 
 fn split_at_char_pos(s: &str, pos: usize) -> (&str, &str) {
@@ -168,6 +170,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             dim_background(f);
             draw_ordering_modal(f, app);
         }
+        Mode::EditingNote => {
+            dim_background(f);
+            draw_note_modal(f, app);
+        }
         _ => {}
     }
 
@@ -189,10 +195,10 @@ fn dim_background(f: &mut Frame) {
 // ── Main table ──────────────────────────────────────────────
 
 fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
-    const STATE_W: u16 = 3;
     const UPTIME_W: u16 = 8;
     const IDLE_W: u16 = 8;
     const DATE_W: u16 = 22;
+    const NOTE_W: u16 = 28;
     const COL_SPACING: u16 = 2;
     const BORDERS: u16 = 2;
     const HIGHLIGHT_SYM: u16 = 2;
@@ -218,7 +224,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         max as u16
     };
 
-    let fixed_base = STATE_W + UPTIME_W + IDLE_W + DATE_W + (COL_SPACING * 5) + BORDERS + HIGHLIGHT_SYM;
+    let fixed_base = UPTIME_W + IDLE_W + DATE_W + NOTE_W + (COL_SPACING * 5) + BORDERS + HIGHLIGHT_SYM;
     let available = area.width.saturating_sub(fixed_base);
 
     let (name_w, proc_w) = if max_name_chars + max_proc_chars <= available {
@@ -240,11 +246,11 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let header = Row::new(vec![
         Cell::from("Name"),
-        Cell::from("S"),
         Cell::from("Process"),
         Cell::from("Uptime"),
         Cell::from("Idle"),
         Cell::from("Last opened"),
+        Cell::from("Note"),
     ])
     .style(header_style)
     .bottom_margin(1);
@@ -288,7 +294,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             }
             ListItem::Separator => {
                 let line_char = "\u{2500}"; // ─
-                let total_w = (name_w + STATE_W + proc_w + UPTIME_W + IDLE_W + DATE_W + COL_SPACING * 5) as usize;
+                let total_w = (name_w + proc_w + UPTIME_W + IDLE_W + DATE_W + NOTE_W + COL_SPACING * 5) as usize;
                 let line_str: String = line_char.repeat(total_w);
                 Row::new(vec![
                     Cell::from(Span::styled(
@@ -340,6 +346,8 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             } => {
                 let bg = if app.constants.contains(name) {
                     if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
+                } else if app.pins.contains(name) {
+                    if selectable_row_idx % 2 == 1 { PIN_ZEBRA_BG } else { PIN_BG }
                 } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
 
@@ -399,15 +407,6 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 };
 
                 let _ = companion; // companion is shown as a separate selectable row below
-                let state_cell = if let Some(ref s) = session {
-                    let color = match s.state {
-                        SessionState::Detached => GREEN,
-                        SessionState::Attached => YELLOW,
-                    };
-                    Cell::from(Span::styled("\u{25cf}", Style::default().fg(color).bg(bg)))
-                } else {
-                    Cell::from(Span::styled("", Style::default().bg(bg)))
-                };
 
                 let proc_text = truncate(
                     &session.as_ref().map(|s| app.session_proc(&s.pid_name).to_string()).unwrap_or_default(),
@@ -434,22 +433,17 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(Span::styled(proc_text, Style::default().fg(PROC_FG).bg(bg)))
                 };
 
+                let note_text = app.notes.get(name)
+                    .map(|n| truncate(n, NOTE_W as usize))
+                    .unwrap_or_default();
+
                 Row::new(vec![
                     name_cell,
-                    state_cell,
                     proc_cell,
-                    Cell::from(Span::styled(
-                        uptime_text,
-                        Style::default().fg(DIM).bg(bg),
-                    )),
-                    Cell::from(Span::styled(
-                        idle_text,
-                        Style::default().fg(DIM).bg(bg),
-                    )),
-                    Cell::from(Span::styled(
-                        date_text,
-                        Style::default().fg(DIM).bg(bg),
-                    )),
+                    Cell::from(Span::styled(uptime_text, Style::default().fg(DIM).bg(bg))),
+                    Cell::from(Span::styled(idle_text, Style::default().fg(DIM).bg(bg))),
+                    Cell::from(Span::styled(date_text, Style::default().fg(DIM).bg(bg))),
+                    Cell::from(Span::styled(note_text, Style::default().fg(NOTE_FG).bg(bg))),
                 ])
                 .style(Style::default().fg(FG).bg(bg))
             }
@@ -457,13 +451,10 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 let is_current = app.is_current_session(session);
                 let is_throwaway = session.name.starts_with("tmp-");
 
-                let state_color = match session.state {
-                    SessionState::Detached => GREEN,
-                    SessionState::Attached => YELLOW,
-                };
-
                 let bg = if app.constants.contains(&session.name) {
                     if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
+                } else if app.pins.contains(&session.name) {
+                    if selectable_row_idx % 2 == 1 { PIN_ZEBRA_BG } else { PIN_BG }
                 } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
                 let is_companion = !is_current && !is_throwaway && session.name.ends_with("-2");
@@ -556,25 +547,20 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(Span::styled(proc_text, Style::default().fg(PROC_FG).bg(bg)))
                 };
 
+                let note_text = app.notes.get(&session.name)
+                    .map(|n| truncate(n, NOTE_W as usize))
+                    .unwrap_or_default();
+
                 Row::new(vec![
                     name_cell,
-                    Cell::from(Span::styled(
-                        "\u{25cf}",
-                        Style::default().fg(state_color).bg(bg),
-                    )),
                     proc_cell,
-                    Cell::from(Span::styled(
-                        uptime_text,
-                        Style::default().fg(DIM).bg(bg),
-                    )),
-                    Cell::from(Span::styled(
-                        idle_text,
-                        Style::default().fg(DIM).bg(bg),
-                    )),
+                    Cell::from(Span::styled(uptime_text, Style::default().fg(DIM).bg(bg))),
+                    Cell::from(Span::styled(idle_text, Style::default().fg(DIM).bg(bg))),
                     Cell::from(Span::styled(
                         app.last_opened(&session.name).unwrap_or_default(),
                         Style::default().fg(DIM).bg(bg),
                     )),
+                    Cell::from(Span::styled(note_text, Style::default().fg(NOTE_FG).bg(bg))),
                 ])
                 .style(Style::default().fg(FG).bg(bg))
             }
@@ -583,11 +569,11 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let widths = [
         Constraint::Length(name_w),
-        Constraint::Length(STATE_W),
         Constraint::Length(proc_w),
         Constraint::Length(UPTIME_W),
         Constraint::Length(IDLE_W),
         Constraint::Length(DATE_W),
+        Constraint::Length(NOTE_W),
     ];
 
     let mut block = Block::default()
@@ -613,7 +599,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     let mut bottom_left_spans: Vec<Span> = Vec::new();
 
     let mut hints: Vec<(&str, &str)> = vec![
-        ("Enter","Attach"), ("c","Create"), ("t","Throwaway"), ("d","Duplicate"), ("n","Rename"), ("x","Kill"), ("p","Pin"), ("C","Constant"), ("/","Search"), ("q","Quit"),
+        ("Enter","Attach"), ("c","Create"), ("t","Throwaway"), ("d","Duplicate"), ("n","Rename"), ("x","Kill"), ("p","Pin"), ("C","Constant"), ("s","Note"), ("/","Search"), ("q","Quit"),
     ];
     if app.workspace_tree.as_ref().is_some_and(|t| t.children.iter().any(|c| !c.is_repo)) {
         hints.push(("O", "Order"));
@@ -1124,6 +1110,52 @@ fn draw_quit_modal(f: &mut Frame) {
         Line::from(Span::styled(
             " y/Enter: confirm  n/Esc: cancel",
             Style::default().fg(DIM).bg(MODAL_BG),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
+        inner,
+    );
+}
+
+// ── Note modal ──────────────────────────────────────────────
+
+fn draw_note_modal(f: &mut Frame, app: &App) {
+    let name = app.selected_item_name().unwrap_or_default();
+    let area = f.area();
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            format!(" Note: {name} "),
+            Style::default().fg(MODAL_TITLE).bg(MODAL_BG).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " Enter save  Esc cancel  Backspace clear ",
+            Style::default().fg(DIM).bg(MODAL_BG),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let max_chars = inner.width.saturating_sub(2) as usize;
+    let display = visible_input(&app.create_input, app.cursor_pos, max_chars);
+
+    let lines = vec![
+        Line::from(Span::styled(" Note:", Style::default().fg(DIM).bg(MODAL_BG))),
+        Line::from(Span::styled(
+            format!(" {display}"),
+            Style::default().fg(NOTE_FG).bg(MODAL_BG).add_modifier(Modifier::BOLD),
         )),
     ];
 

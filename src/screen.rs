@@ -17,6 +17,7 @@ pub enum SessionState {
 pub struct Session {
     pub name: String,
     pub pid_name: String,
+    #[allow(dead_code)]
     pub state: SessionState,
     pub created: Option<u64>,
     pub idle_secs: Option<u64>,

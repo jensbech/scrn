@@ -228,6 +228,7 @@ fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
                         KeyCode::Char('r') => app.refresh_sessions(),
                         KeyCode::Char('t') => app.create_throwaway(),
                         KeyCode::Char('d') => app.duplicate_session(),
+                        KeyCode::Char('s') => app.start_note_edit(),
                         KeyCode::Char('O') => app.start_ordering(),
                         _ => {}
                     },
@@ -273,6 +274,27 @@ fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
                     Mode::Renaming => match key.code {
                         KeyCode::Enter => app.confirm_rename(),
                         KeyCode::Esc => app.cancel_rename(),
+                        KeyCode::Left => {
+                            if app.cursor_pos > 0 {
+                                app.cursor_pos -= 1;
+                            }
+                        }
+                        KeyCode::Right => {
+                            if app.cursor_pos < app.create_input.chars().count() {
+                                app.cursor_pos += 1;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            input_backspace(&mut app.create_input, &mut app.cursor_pos);
+                        }
+                        KeyCode::Char(c) => {
+                            input_insert(&mut app.create_input, &mut app.cursor_pos, c);
+                        }
+                        _ => {}
+                    },
+                    Mode::EditingNote => match key.code {
+                        KeyCode::Enter => app.confirm_note(),
+                        KeyCode::Esc => app.cancel_note(),
                         KeyCode::Left => {
                             if app.cursor_pos > 0 {
                                 app.cursor_pos -= 1;
