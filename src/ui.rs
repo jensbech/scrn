@@ -94,18 +94,6 @@ fn visible_input(input: &str, cursor_pos: usize, max_chars: usize) -> String {
     result
 }
 
-/// Read the current git branch by parsing .git/HEAD (no subprocess).
-fn git_branch(repo_path: &std::path::Path) -> Option<String> {
-    let head = std::fs::read_to_string(repo_path.join(".git/HEAD")).ok()?;
-    let head = head.trim();
-    if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
-        Some(branch.to_string())
-    } else {
-        // Detached HEAD — show short SHA
-        head.get(..7).map(|s| s.to_string())
-    }
-}
-
 fn truncate(s: &str, max: usize) -> String {
     let count = s.chars().count();
     if count <= max {
@@ -233,18 +221,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         max as u16
     };
 
-    // Collect branch names for all visible repo rows.
-    let branch_map: std::collections::HashMap<String, String> = app.display_items.iter()
-        .filter_map(|item| {
-            if let ListItem::TreeRepo { name, path, .. } = item {
-                git_branch(path).map(|b| (name.clone(), b))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let max_branch_chars = branch_map.values()
+    let max_branch_chars = app.branch_map.values()
         .map(|b| b.chars().count())
         .max()
         .unwrap_or(0) as u16;
@@ -457,7 +434,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(Span::styled(note_text, Style::default().fg(NOTE_FG).bg(bg))),
                 ];
                 if branch_w > 0 {
-                    let branch_text = branch_map.get(name)
+                    let branch_text = app.branch_map.get(name)
                         .map(|b| truncate(b, branch_w as usize))
                         .unwrap_or_default();
                     cells.push(Cell::from(Span::styled(branch_text, Style::default().fg(BRANCH_FG).bg(bg))));

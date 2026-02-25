@@ -86,6 +86,8 @@ pub struct App {
     pub ordering_selected: usize,
     /// in-memory notes per item name, not persisted to disk
     pub notes: HashMap<String, String>,
+    /// repo name -> current git branch, refreshed with sessions
+    pub branch_map: HashMap<String, String>,
 }
 
 impl App {
@@ -125,6 +127,7 @@ impl App {
             ordering_items: Vec::new(),
             ordering_selected: 0,
             notes: load_notes(),
+            branch_map: HashMap::new(),
         }
     }
 
@@ -667,6 +670,17 @@ impl App {
         if self.selected >= self.selectable_indices.len() {
             self.selected = self.selectable_indices.len().saturating_sub(1);
         }
+
+        // Rebuild branch map from display items (read .git/HEAD once per refresh, not per frame).
+        self.branch_map = self.display_items.iter()
+            .filter_map(|item| {
+                if let ListItem::TreeRepo { name, path, .. } = item {
+                    read_git_branch(path).map(|b| (name.clone(), b))
+                } else {
+                    None
+                }
+            })
+            .collect();
     }
 
     pub fn confirm_search(&mut self) {
@@ -1380,6 +1394,16 @@ fn save_notes(notes: &HashMap<String, String>) {
     lines.sort();
     let content = if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" };
     let _ = std::fs::write(&path, content);
+}
+
+pub fn read_git_branch(repo_path: &std::path::Path) -> Option<String> {
+    let head = std::fs::read_to_string(repo_path.join(".git/HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
+        Some(branch.to_string())
+    } else {
+        head.get(..7).map(|s| s.to_string())
+    }
 }
 
 fn reorder_tree_children(tree: &mut TreeNode, order: &[String]) {
