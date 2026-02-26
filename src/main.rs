@@ -8,6 +8,7 @@ mod workspace;
 
 use std::io;
 use std::process::Command;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -105,44 +106,83 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.refresh_sessions();
     app.restore_sessions();
 
+    // Set up terminal once for the whole session lifetime — no flash between cycles.
+    let mut stdout = io::stdout();
+    enable_raw_mode()?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+    terminal.clear()?;
+
     // Main loop: show picker → spawn screen → wait for detach → repeat
+    let mut pending_refresh: Option<Receiver<app::RefreshData>> = None;
     loop {
-        let action = run_picker(&mut app)?;
+        let action = run_picker(&mut app, &mut terminal, pending_refresh.take())?;
 
         match action {
             Action::Attach(ref pid_name) => {
-                // Inject keybinding + flow control into existing sessions
-                // (screenrc is only read at session creation time)
-                let _ = Command::new("screen")
-                    .args(["-S", pid_name, "-X", "bindkey", "^S", "detach"])
-                    .status();
-                let _ = Command::new("screen")
-                    .args(["-S", pid_name, "-X", "defflow", "off"])
-                    .status();
+                // Yield terminal to screen, re-take it immediately on return
+                yield_terminal(&mut terminal)?;
+
+                // Inject keybinding + flow control into existing sessions in parallel
+                let pn1 = pid_name.clone();
+                let pn2 = pid_name.clone();
+                let t1 = std::thread::spawn(move || {
+                    Command::new("screen")
+                        .args(["-S", &pn1, "-X", "bindkey", "^S", "detach"])
+                        .status()
+                });
+                let t2 = std::thread::spawn(move || {
+                    Command::new("screen")
+                        .args(["-S", &pn2, "-X", "defflow", "off"])
+                        .status()
+                });
+                t1.join().ok();
+                t2.join().ok();
                 let rc = screen::ensure_screenrc();
                 let _ = Command::new("screen")
                     .args(["-c", &rc, "-d", "-r", pid_name])
                     .status();
-                // Screen exited (user detached) — refresh and loop back to picker
+
+                // Reclaim terminal before anything else — eliminates the flash
+                reclaim_terminal(&mut terminal)?;
                 app.action = Action::None;
-                app.refresh_sessions();
+                pending_refresh = Some(app::spawn_refresh(
+                    app.workspace_dir.clone(),
+                    app.dir_order.clone(),
+                ));
             }
             Action::Create(ref name, Some(ref dir)) => {
+                yield_terminal(&mut terminal)?;
                 let rc = screen::ensure_screenrc();
                 let _ = Command::new("screen")
                     .args(["-c", &rc, "-S", name])
                     .current_dir(dir)
                     .status();
+                reclaim_terminal(&mut terminal)?;
                 app.action = Action::None;
-                app.refresh_sessions();
+                pending_refresh = Some(app::spawn_refresh(
+                    app.workspace_dir.clone(),
+                    app.dir_order.clone(),
+                ));
             }
             Action::Create(ref name, None) => {
+                yield_terminal(&mut terminal)?;
                 let rc = screen::ensure_screenrc();
                 let _ = Command::new("screen")
                     .args(["-c", &rc, "-S", name])
                     .status();
+                reclaim_terminal(&mut terminal)?;
                 app.action = Action::None;
-                app.refresh_sessions();
+                pending_refresh = Some(app::spawn_refresh(
+                    app.workspace_dir.clone(),
+                    app.dir_order.clone(),
+                ));
             }
             Action::Quit | Action::None => break,
         }
@@ -150,6 +190,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     app.kill_all_throwaway();
 
+    // Final teardown
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
+
+    Ok(())
+}
+
+/// Temporarily restore the terminal to its normal state so screen can take it over.
+fn yield_terminal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
+    Ok(())
+}
+
+/// Reclaim the terminal after screen exits — enter alternate screen and redraw.
+fn reclaim_terminal(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
+    terminal.clear()?;
     Ok(())
 }
 
@@ -162,22 +243,25 @@ fn hit_test_row(app: &App, row: u16) -> Option<usize> {
 }
 
 /// Show the TUI session picker and return the user's chosen action.
-fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
-    let mut stdout = io::stdout();
-    enable_raw_mode()?;
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    )?;
-
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    terminal.clear()?;
+/// If `refresh_rx` is provided, the UI starts immediately with current (possibly stale)
+/// data and applies the fresh data as soon as the background thread delivers it.
+fn run_picker(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    refresh_rx: Option<Receiver<app::RefreshData>>,
+) -> Result<Action, Box<dyn std::error::Error>> {
+    let mut refresh_rx = refresh_rx;
 
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
+
+        // Apply background refresh data as soon as it arrives
+        if let Some(ref rx) = refresh_rx {
+            if let Ok(data) = rx.try_recv() {
+                app.apply_refresh_data(data);
+                refresh_rx = None;
+            }
+        }
 
         // Auto-clear stale status messages
         if !app.status_msg.is_empty()
@@ -408,16 +492,6 @@ fn run_picker(app: &mut App) -> Result<Action, Box<dyn std::error::Error>> {
             }
         }
     }
-
-    // Teardown terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        PopKeyboardEnhancementFlags,
-        DisableBracketedPaste,
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    )?;
 
     // Move the action out so we can return it
     let action = std::mem::replace(&mut app.action, Action::None);

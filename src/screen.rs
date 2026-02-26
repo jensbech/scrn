@@ -300,15 +300,28 @@ fn normalize_args(args: &str) -> String {
     parts.join(" ")
 }
 
-/// Runs one `ps` call and returns a map from screen session PID → foreground
-/// process + arguments (empty if the session is just sitting at a shell prompt).
-pub fn get_foreground_processes(session_pids: &[u32]) -> HashMap<u32, String> {
-    if session_pids.is_empty() {
-        return HashMap::new();
+/// Parsed output of a single `ps -axo pid=,ppid=,args=` call.
+/// Can be built independently of knowing which session PIDs to query.
+pub struct ProcessMap {
+    args_map: HashMap<u32, String>,
+    children: HashMap<u32, Vec<u32>>,
+}
+
+impl Default for ProcessMap {
+    fn default() -> Self {
+        Self {
+            args_map: HashMap::new(),
+            children: HashMap::new(),
+        }
     }
+}
+
+/// Run `ps -axo` once and return the parsed process tree.
+/// This is the slow part (subprocess); split from the BFS so it can run in parallel.
+pub fn build_process_map() -> ProcessMap {
     let output = match Command::new("ps").args(["-axo", "pid=,ppid=,args="]).output() {
         Ok(o) => o,
-        Err(_) => return HashMap::new(),
+        Err(_) => return ProcessMap::default(),
     };
     let text = String::from_utf8_lossy(&output.stdout);
 
@@ -317,7 +330,6 @@ pub fn get_foreground_processes(session_pids: &[u32]) -> HashMap<u32, String> {
 
     for line in text.lines() {
         let trimmed = line.trim();
-        // pid and ppid are numeric, everything after is the full args string.
         let Some((pid_str, rest)) = trimmed.split_once(|c: char| c.is_ascii_whitespace()) else { continue };
         let rest = rest.trim_start();
         let Some((ppid_str, args_str)) = rest.split_once(|c: char| c.is_ascii_whitespace()) else { continue };
@@ -328,9 +340,18 @@ pub fn get_foreground_processes(session_pids: &[u32]) -> HashMap<u32, String> {
         children.entry(ppid).or_default().push(pid);
     }
 
+    ProcessMap { args_map, children }
+}
+
+/// BFS through a pre-built process map to find the foreground process for each session.
+/// Pure computation — no subprocess.
+pub fn foreground_from_map(map: &ProcessMap, session_pids: &[u32]) -> HashMap<u32, String> {
+    if session_pids.is_empty() {
+        return HashMap::new();
+    }
+
     let mut result: HashMap<u32, String> = HashMap::new();
     'outer: for &screen_pid in session_pids {
-        // BFS from the screen server, skipping screen/shell nodes, up to 4 levels deep.
         let mut frontier = vec![screen_pid];
         let mut visited = std::collections::HashSet::new();
         visited.insert(screen_pid);
@@ -338,12 +359,12 @@ pub fn get_foreground_processes(session_pids: &[u32]) -> HashMap<u32, String> {
         for _ in 0..4 {
             let mut next = Vec::new();
             for pid in frontier {
-                let Some(kids) = children.get(&pid) else { continue };
+                let Some(kids) = map.children.get(&pid) else { continue };
                 for &kid in kids {
                     if !visited.insert(kid) {
                         continue;
                     }
-                    let args = args_map.get(&kid).map(|s| s.as_str()).unwrap_or("");
+                    let args = map.args_map.get(&kid).map(|s| s.as_str()).unwrap_or("");
                     if is_shell_or_screen(args) {
                         next.push(kid);
                     } else {
@@ -360,6 +381,7 @@ pub fn get_foreground_processes(session_pids: &[u32]) -> HashMap<u32, String> {
     }
     result
 }
+
 
 fn get_process_cwd(pid: u32) -> Option<PathBuf> {
     // Linux: /proc/<pid>/cwd symlink

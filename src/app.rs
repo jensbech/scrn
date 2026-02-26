@@ -28,6 +28,13 @@ pub enum Action {
     Quit,
 }
 
+/// Data collected by a refresh — can be built on a background thread.
+pub struct RefreshData {
+    pub sessions: Vec<Session>,
+    pub foreground_procs: HashMap<u32, String>,
+    pub workspace_tree: Option<TreeNode>,
+}
+
 #[derive(Clone)]
 pub enum ListItem {
     SectionHeader(String),
@@ -132,28 +139,56 @@ impl App {
     }
 
     pub fn refresh_sessions(&mut self) {
-        match screen::list_sessions() {
-            Ok(sessions) => {
-                self.all_sessions = sessions;
-            }
-            Err(e) => {
-                self.set_status(format!("Error: {e}"));
-            }
+        let dir = self.workspace_dir.clone();
+        let dir_order = self.dir_order.clone();
+        let (sessions, process_map, workspace_tree) = std::thread::scope(|s| {
+            let sessions_h = s.spawn(|| screen::list_sessions());
+            let ps_h = s.spawn(|| screen::build_process_map());
+            let tree_h = s.spawn(move || {
+                dir.as_ref().map(|d| {
+                    let mut tree = workspace::scan_tree(d);
+                    if !dir_order.is_empty() {
+                        reorder_tree_children(&mut tree, &dir_order);
+                    }
+                    tree
+                })
+            });
+            let sessions = sessions_h.join().unwrap_or(Ok(Vec::new()));
+            let ps = ps_h.join().unwrap_or_default();
+            let tree = tree_h.join().unwrap_or(None);
+            (sessions, ps, tree)
+        });
+        match sessions {
+            Ok(s) => self.all_sessions = s,
+            Err(e) => self.set_status(format!("Error: {e}")),
         }
         let pids: Vec<u32> = self.all_sessions
             .iter()
             .filter_map(|s| s.pid_name.split('.').next()?.parse().ok())
             .collect();
-        self.foreground_procs = screen::get_foreground_processes(&pids);
-        if let Some(ref dir) = self.workspace_dir {
-            let mut tree = workspace::scan_tree(dir);
-            if !self.dir_order.is_empty() {
-                reorder_tree_children(&mut tree, &self.dir_order);
-            }
-            self.workspace_tree = Some(tree);
+        self.foreground_procs = screen::foreground_from_map(&process_map, &pids);
+        if workspace_tree.is_some() {
+            self.workspace_tree = workspace_tree;
         }
         save_sessions(&self.all_sessions, &self.workspace_tree);
         // Prune notes for sessions that no longer exist.
+        let live: HashSet<String> = self.all_sessions.iter().map(|s| s.name.clone()).collect();
+        let before = self.notes.len();
+        self.notes.retain(|name, _| live.contains(name));
+        if self.notes.len() != before {
+            save_notes(&self.notes);
+        }
+        self.apply_search_filter();
+    }
+
+    /// Apply a completed background refresh to app state.
+    pub fn apply_refresh_data(&mut self, data: RefreshData) {
+        self.all_sessions = data.sessions;
+        self.foreground_procs = data.foreground_procs;
+        if data.workspace_tree.is_some() {
+            self.workspace_tree = data.workspace_tree;
+        }
+        save_sessions(&self.all_sessions, &self.workspace_tree);
         let live: HashSet<String> = self.all_sessions.iter().map(|s| s.name.clone()).collect();
         let before = self.notes.len();
         self.notes.retain(|name, _| live.contains(name));
@@ -1404,6 +1439,46 @@ pub fn read_git_branch(repo_path: &std::path::Path) -> Option<String> {
     } else {
         head.get(..7).map(|s| s.to_string())
     }
+}
+
+/// Spawn a background thread that runs `screen -ls`, `ps`, and workspace scan
+/// in parallel. Returns a receiver for the completed `RefreshData`.
+/// The UI can start immediately with stale data and apply the update on arrival.
+pub fn spawn_refresh(
+    workspace_dir: Option<PathBuf>,
+    dir_order: Vec<String>,
+) -> std::sync::mpsc::Receiver<RefreshData> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let (sessions, process_map, workspace_tree) = std::thread::scope(|s| {
+            let sessions_h = s.spawn(|| screen::list_sessions().unwrap_or_default());
+            let ps_h = s.spawn(|| screen::build_process_map());
+            let tree_h = s.spawn(move || {
+                workspace_dir.as_ref().map(|d| {
+                    let mut tree = workspace::scan_tree(d);
+                    if !dir_order.is_empty() {
+                        reorder_tree_children(&mut tree, &dir_order);
+                    }
+                    tree
+                })
+            });
+            let sessions = sessions_h.join().unwrap_or_default();
+            let ps = ps_h.join().unwrap_or_default();
+            let tree = tree_h.join().unwrap_or(None);
+            (sessions, ps, tree)
+        });
+        let pids: Vec<u32> = sessions
+            .iter()
+            .filter_map(|s| s.pid_name.split('.').next()?.parse().ok())
+            .collect();
+        let foreground_procs = screen::foreground_from_map(&process_map, &pids);
+        let _ = tx.send(RefreshData {
+            sessions,
+            foreground_procs,
+            workspace_tree,
+        });
+    });
+    rx
 }
 
 fn reorder_tree_children(tree: &mut TreeNode, order: &[String]) {
