@@ -95,6 +95,8 @@ pub struct App {
     pub notes: HashMap<String, String>,
     /// repo name -> current git branch, refreshed with sessions
     pub branch_map: HashMap<String, String>,
+    /// sessions to restore on startup, loaded before refresh_sessions overwrites the file
+    sessions_to_restore: Vec<(String, Option<PathBuf>)>,
 }
 
 impl App {
@@ -135,6 +137,7 @@ impl App {
             ordering_selected: 0,
             notes: load_notes(),
             branch_map: HashMap::new(),
+            sessions_to_restore: load_saved_sessions(),
         }
     }
 
@@ -199,7 +202,7 @@ impl App {
     }
 
     pub fn restore_sessions(&mut self) {
-        let saved = load_saved_sessions();
+        let saved = std::mem::take(&mut self.sessions_to_restore);
         if saved.is_empty() {
             return;
         }
