@@ -105,6 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new(cfg.workspace);
     app.refresh_sessions();
     app.restore_sessions();
+    app.maybe_enter_recent();
 
     // Set up terminal once for the whole session lifetime — no flash between cycles.
     let mut stdout = io::stdout();
@@ -152,6 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Reclaim terminal before anything else — eliminates the flash
                 reclaim_terminal(&mut terminal)?;
                 app.action = Action::None;
+                app.maybe_enter_recent();
                 pending_refresh = Some(app::spawn_refresh(
                     app.workspace_dir.clone(),
                     app.dir_order.clone(),
@@ -166,6 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .status();
                 reclaim_terminal(&mut terminal)?;
                 app.action = Action::None;
+                app.maybe_enter_recent();
                 pending_refresh = Some(app::spawn_refresh(
                     app.workspace_dir.clone(),
                     app.dir_order.clone(),
@@ -179,6 +182,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .status();
                 reclaim_terminal(&mut terminal)?;
                 app.action = Action::None;
+                app.maybe_enter_recent();
                 pending_refresh = Some(app::spawn_refresh(
                     app.workspace_dir.clone(),
                     app.dir_order.clone(),
@@ -310,6 +314,7 @@ fn run_picker(
                             }
                         }
                         KeyCode::Char('r') => app.refresh_sessions(),
+                        KeyCode::Char('R') => app.start_recent(),
                         KeyCode::Char('t') => app.create_throwaway(),
                         KeyCode::Char('d') => app.duplicate_session(),
                         KeyCode::Char('s') => app.start_note_edit(),
@@ -456,6 +461,21 @@ fn run_picker(
                         }
                         KeyCode::Enter => app.confirm_ordering(),
                         KeyCode::Esc => app.cancel_ordering(),
+                        _ => {}
+                    },
+                    Mode::RecentPicker => match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if app.mru_selected + 1 < app.mru_items.len() {
+                                app.mru_selected += 1;
+                            }
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            if app.mru_selected > 0 {
+                                app.mru_selected -= 1;
+                            }
+                        }
+                        KeyCode::Enter => app.confirm_recent(),
+                        KeyCode::Esc | KeyCode::Char('R') => app.cancel_recent(),
                         _ => {}
                     },
                 },
