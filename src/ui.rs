@@ -128,7 +128,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     };
     let chunks = Layout::vertical(constraints).split(f.area());
 
-    draw_table(f, app, chunks[0]);
+    const MAX_WIDTH: u16 = 140;
+    let table_area = if chunks[0].width > MAX_WIDTH {
+        let x = chunks[0].x + (chunks[0].width - MAX_WIDTH) / 2;
+        Rect::new(x, chunks[0].y, MAX_WIDTH, chunks[0].height)
+    } else {
+        chunks[0]
+    };
+    draw_table(f, app, table_area);
     if show_search_bar {
         draw_search_bar(f, app, chunks[1]);
     }
@@ -173,10 +180,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::EditingNote => {
             dim_background(f);
             draw_note_modal(f, app);
-        }
-        Mode::RecentPicker => {
-            dim_background(f);
-            draw_recent_modal(f, app);
         }
         _ => {}
     }
@@ -1200,60 +1203,4 @@ fn draw_ordering_modal(f: &mut Frame, app: &App) {
     );
 }
 
-fn draw_recent_modal(f: &mut Frame, app: &App) {
-    let area = f.area();
-    let n = app.mru_items.len() as u16;
-    const MODAL_WIDTH: u16 = 52;
-    const NAME_COL: usize = 25;
-    const PROC_COL: usize = 20;
-    let width = MODAL_WIDTH.min(area.width.saturating_sub(4));
-    let height = (n + 2).min(area.height.saturating_sub(4));
-    let x = (area.width * 2 / 5).saturating_sub(width / 2);
-    let y = (area.height.saturating_sub(height)) / 2;
-    let modal_area = Rect::new(x, y, width, height);
-
-    f.render_widget(Clear, modal_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
-        .style(Style::default().fg(FG).bg(MODAL_BG))
-        .title(Span::styled(
-            " recent ",
-            Style::default().fg(MODAL_TITLE).bg(MODAL_BG).add_modifier(Modifier::BOLD),
-        ));
-
-    let inner = block.inner(modal_area);
-    f.render_widget(block, modal_area);
-
-    let lines: Vec<Line> = app.mru_items.iter().enumerate().map(|(i, (name, _))| {
-        let selected = i == app.mru_selected;
-        let is_const = app.constants.contains(name.as_str());
-        let bg = if selected { HIGHLIGHT_BG } else { MODAL_BG };
-        let prefix = if selected { " \u{2588} " } else { "   " };
-        let session = app.all_sessions.iter().find(|s| s.name == *name);
-        let fg = if is_const {
-            MATCH_FG
-        } else if session.is_some() {
-            GREEN
-        } else {
-            REPO_FG
-        };
-        let name_padded = format!("{:<width$}", truncate(name, NAME_COL), width = NAME_COL);
-        let proc_text = session
-            .map(|s| truncate(app.session_proc(&s.pid_name), PROC_COL))
-            .unwrap_or_default();
-        Line::from(vec![
-            Span::styled(prefix, Style::default().fg(ACCENT).bg(bg)),
-            Span::styled(name_padded, Style::default().fg(fg).bg(bg)),
-            Span::styled("  ", Style::default().bg(bg)),
-            Span::styled(proc_text, Style::default().fg(DIM).bg(bg)),
-        ])
-    }).collect();
-
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
-        inner,
-    );
-}
 
