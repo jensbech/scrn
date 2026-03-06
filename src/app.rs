@@ -886,13 +886,12 @@ impl App {
         constant_items.sort_by(|a, b| a.0.cmp(&b.0));
 
         let mut recent_entries: Vec<(&String, &u64)> = self.history.iter()
-            .filter(|(name, _)| !self.constants.contains(*name))
+            .filter(|(name, ts)| !self.constants.contains(*name) && is_today(**ts))
             .collect();
         recent_entries.sort_by(|a, b| b.1.cmp(a.1));
 
         let recent_items: Vec<(String, Option<PathBuf>)> = recent_entries
             .into_iter()
-            .take(5)
             .map(|(name, _)| (name.clone(), repo_paths.get(name).cloned()))
             .collect();
 
