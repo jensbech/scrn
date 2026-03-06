@@ -19,6 +19,7 @@ pub enum Mode {
     ConfirmQuit,
     Ordering,
     EditingNote,
+    RecentPicker,
 }
 
 pub enum Action {
@@ -91,6 +92,8 @@ pub struct App {
     pub dir_order: Vec<String>,
     pub ordering_items: Vec<String>,
     pub ordering_selected: usize,
+    pub mru_items: Vec<(String, Option<PathBuf>)>,
+    pub mru_selected: usize,
     /// in-memory notes per item name, not persisted to disk
     pub notes: HashMap<String, String>,
     /// repo name -> current git branch, refreshed with sessions
@@ -135,6 +138,8 @@ impl App {
             dir_order: load_dir_order(),
             ordering_items: Vec::new(),
             ordering_selected: 0,
+            mru_items: Vec::new(),
+            mru_selected: 0,
             notes: load_notes(),
             branch_map: HashMap::new(),
             sessions_to_restore: load_saved_sessions(),
@@ -869,6 +874,60 @@ impl App {
         self.mode = Mode::Normal;
     }
 
+    pub fn start_recent(&mut self) {
+        let mut repo_paths: HashMap<String, PathBuf> = HashMap::new();
+        if let Some(ref tree) = self.workspace_tree {
+            collect_repo_paths(tree, &mut repo_paths);
+        }
+
+        let mut constant_items: Vec<(String, Option<PathBuf>)> = self.constants.iter()
+            .map(|name| (name.clone(), repo_paths.get(name).cloned()))
+            .collect();
+        constant_items.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut recent_entries: Vec<(&String, &u64)> = self.history.iter()
+            .filter(|(name, _)| !self.constants.contains(*name))
+            .collect();
+        recent_entries.sort_by(|a, b| b.1.cmp(a.1));
+
+        let recent_items: Vec<(String, Option<PathBuf>)> = recent_entries
+            .into_iter()
+            .take(5)
+            .map(|(name, _)| (name.clone(), repo_paths.get(name).cloned()))
+            .collect();
+
+        self.mru_items = constant_items.into_iter().chain(recent_items).collect();
+
+        if self.mru_items.is_empty() {
+            return;
+        }
+        self.mru_selected = 0;
+        self.mode = Mode::RecentPicker;
+    }
+
+    pub fn confirm_recent(&mut self) {
+        let (name, path) = match self.mru_items.get(self.mru_selected) {
+            Some(item) => item.clone(),
+            None => {
+                self.mode = Mode::Normal;
+                return;
+            }
+        };
+        let session = self.all_sessions.iter().find(|s| s.name == name).cloned();
+        if let Some(session) = session {
+            self.record_opened(&session.name);
+            self.action = Action::Attach(session.pid_name.clone());
+        } else {
+            self.record_opened(&name);
+            self.action = Action::Create(name, path);
+        }
+        self.mode = Mode::Normal;
+    }
+
+    pub fn cancel_recent(&mut self) {
+        self.mode = Mode::Normal;
+    }
+
     pub fn selected_item_name(&self) -> Option<String> {
         let visual_idx = *self.selectable_indices.get(self.selected)?;
         match self.display_items.get(visual_idx)? {
@@ -1299,6 +1358,32 @@ fn sessions_path() -> PathBuf {
         .join("sessions")
 }
 
+fn is_today(ts: u64) -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as libc::time_t;
+    let ts_t = ts as libc::time_t;
+    unsafe {
+        let mut now_tm: libc::tm = std::mem::zeroed();
+        let mut ts_tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&now, &mut now_tm).is_null() {
+            return false;
+        }
+        if libc::localtime_r(&ts_t, &mut ts_tm).is_null() {
+            return false;
+        }
+        now_tm.tm_yday == ts_tm.tm_yday && now_tm.tm_year == ts_tm.tm_year
+    }
+}
+
+pub fn today_history_count(history: &HashMap<String, u64>, constants: &HashSet<String>) -> usize {
+    history
+        .iter()
+        .filter(|(name, ts)| !constants.contains(*name) && is_today(**ts))
+        .count()
+}
+
 fn load_history() -> HashMap<String, u64> {
     let path = history_path();
     let contents = match std::fs::read_to_string(&path) {
@@ -1603,4 +1688,38 @@ fn find_substring_pos(haystack: &[char], needle: &[char]) -> Option<usize> {
         return Some(start);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn today_history_count_excludes_constants() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut history = HashMap::new();
+        history.insert("a".to_string(), now);
+        history.insert("b".to_string(), now);
+        history.insert("c".to_string(), now);
+        let mut constants = HashSet::new();
+        constants.insert("c".to_string());
+        assert_eq!(today_history_count(&history, &constants), 2);
+    }
+
+    #[test]
+    fn today_history_count_ignores_old_entries() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let yesterday = now - 90_000;
+        let mut history = HashMap::new();
+        history.insert("a".to_string(), now);
+        history.insert("b".to_string(), yesterday);
+        let constants = HashSet::new();
+        assert_eq!(today_history_count(&history, &constants), 1);
+    }
 }
