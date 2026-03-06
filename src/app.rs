@@ -146,6 +146,12 @@ impl App {
         }
     }
 
+    pub fn maybe_enter_recent(&mut self) {
+        if today_history_count(&self.history, &self.constants) >= 2 {
+            self.start_recent();
+        }
+    }
+
     pub fn refresh_sessions(&mut self) {
         let dir = self.workspace_dir.clone();
         let dir_order = self.dir_order.clone();
