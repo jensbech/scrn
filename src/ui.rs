@@ -1232,13 +1232,7 @@ fn draw_recent_modal(f: &mut Frame, app: &App) {
     let lines: Vec<Line> = app.mru_items.iter().enumerate().map(|(i, (name, _))| {
         let selected = i == app.mru_selected;
         let is_const = app.constants.contains(name.as_str());
-        let bg = if selected {
-            HIGHLIGHT_BG
-        } else if is_const {
-            CONST_BG
-        } else {
-            MODAL_BG
-        };
+        let bg = if selected { HIGHLIGHT_BG } else { MODAL_BG };
         let prefix = if selected { " \u{2588} " } else { "   " };
         let has_session = app.all_sessions.iter().any(|s| s.name == *name);
         let fg = if is_const {

@@ -94,6 +94,7 @@ pub struct App {
     pub ordering_selected: usize,
     pub mru_items: Vec<(String, Option<PathBuf>)>,
     pub mru_selected: usize,
+    pub last_opened_name: Option<String>,
     /// in-memory notes per item name, not persisted to disk
     pub notes: HashMap<String, String>,
     /// repo name -> current git branch, refreshed with sessions
@@ -140,6 +141,7 @@ impl App {
             ordering_selected: 0,
             mru_items: Vec::new(),
             mru_selected: 0,
+            last_opened_name: None,
             notes: load_notes(),
             branch_map: HashMap::new(),
             sessions_to_restore: load_saved_sessions(),
@@ -906,7 +908,9 @@ impl App {
         if self.mru_items.is_empty() {
             return;
         }
-        self.mru_selected = 0;
+        self.mru_selected = self.last_opened_name.as_deref()
+            .and_then(|name| self.mru_items.iter().position(|(n, _)| n == name))
+            .unwrap_or(0);
         self.mode = Mode::RecentPicker;
     }
 
@@ -1096,6 +1100,7 @@ impl App {
             .as_secs();
         self.history.insert(name.to_string(), ts);
         save_history(&self.history);
+        self.last_opened_name = Some(name.to_string());
     }
 
     /// Return the foreground process name for the session identified by `pid_name`,
