@@ -174,6 +174,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             dim_background(f);
             draw_note_modal(f, app);
         }
+        Mode::RecentPicker => {
+            dim_background(f);
+            draw_recent_modal(f, app);
+        }
         _ => {}
     }
 
@@ -1184,6 +1188,66 @@ fn draw_ordering_modal(f: &mut Frame, app: &App) {
         let bg = if selected { HIGHLIGHT_BG } else { MODAL_BG };
         let fg = if selected { FG_BRIGHT } else { FG };
         let prefix = if selected { " \u{2588} " } else { "   " };
+        Line::from(vec![
+            Span::styled(prefix, Style::default().fg(ACCENT).bg(bg)),
+            Span::styled(name.clone(), Style::default().fg(fg).bg(bg)),
+        ])
+    }).collect();
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
+        inner,
+    );
+}
+
+fn draw_recent_modal(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let n = app.mru_items.len() as u16;
+    let height = (n + 2).min(area.height.saturating_sub(4));
+    let width = app.mru_items.iter()
+        .map(|(name, _)| name.chars().count() as u16)
+        .max()
+        .unwrap_or(20)
+        .max(16)
+        .saturating_add(6)
+        .min(area.width.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            " recent ",
+            Style::default().fg(MODAL_TITLE).bg(MODAL_BG).add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let lines: Vec<Line> = app.mru_items.iter().enumerate().map(|(i, (name, _))| {
+        let selected = i == app.mru_selected;
+        let is_const = app.constants.contains(name.as_str());
+        let bg = if selected {
+            HIGHLIGHT_BG
+        } else if is_const {
+            CONST_BG
+        } else {
+            MODAL_BG
+        };
+        let prefix = if selected { " \u{2588} " } else { "   " };
+        let has_session = app.all_sessions.iter().any(|s| s.name == *name);
+        let fg = if is_const {
+            MATCH_FG
+        } else if has_session {
+            GREEN
+        } else {
+            REPO_FG
+        };
         Line::from(vec![
             Span::styled(prefix, Style::default().fg(ACCENT).bg(bg)),
             Span::styled(name.clone(), Style::default().fg(fg).bg(bg)),
