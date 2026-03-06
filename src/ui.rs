@@ -1203,15 +1203,12 @@ fn draw_ordering_modal(f: &mut Frame, app: &App) {
 fn draw_recent_modal(f: &mut Frame, app: &App) {
     let area = f.area();
     let n = app.mru_items.len() as u16;
+    const MODAL_WIDTH: u16 = 52;
+    const NAME_COL: usize = 25;
+    const PROC_COL: usize = 20;
+    let width = MODAL_WIDTH.min(area.width.saturating_sub(4));
     let height = (n + 2).min(area.height.saturating_sub(4));
-    let width = app.mru_items.iter()
-        .map(|(name, _)| name.chars().count() as u16)
-        .max()
-        .unwrap_or(20)
-        .max(16)
-        .saturating_add(6)
-        .min(area.width.saturating_sub(4));
-    let x = (area.width.saturating_sub(width)) / 2;
+    let x = (area.width * 2 / 5).saturating_sub(width / 2);
     let y = (area.height.saturating_sub(height)) / 2;
     let modal_area = Rect::new(x, y, width, height);
 
@@ -1234,17 +1231,23 @@ fn draw_recent_modal(f: &mut Frame, app: &App) {
         let is_const = app.constants.contains(name.as_str());
         let bg = if selected { HIGHLIGHT_BG } else { MODAL_BG };
         let prefix = if selected { " \u{2588} " } else { "   " };
-        let has_session = app.all_sessions.iter().any(|s| s.name == *name);
+        let session = app.all_sessions.iter().find(|s| s.name == *name);
         let fg = if is_const {
             MATCH_FG
-        } else if has_session {
+        } else if session.is_some() {
             GREEN
         } else {
             REPO_FG
         };
+        let name_padded = format!("{:<width$}", truncate(name, NAME_COL), width = NAME_COL);
+        let proc_text = session
+            .map(|s| truncate(app.session_proc(&s.pid_name), PROC_COL))
+            .unwrap_or_default();
         Line::from(vec![
             Span::styled(prefix, Style::default().fg(ACCENT).bg(bg)),
-            Span::styled(name.clone(), Style::default().fg(fg).bg(bg)),
+            Span::styled(name_padded, Style::default().fg(fg).bg(bg)),
+            Span::styled("  ", Style::default().bg(bg)),
+            Span::styled(proc_text, Style::default().fg(DIM).bg(bg)),
         ])
     }).collect();
 
