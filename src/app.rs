@@ -95,8 +95,6 @@ pub struct App {
     pub ordering_selected: usize,
     /// in-memory notes per item name, not persisted to disk
     pub notes: HashMap<String, String>,
-    /// repo name -> current git branch, refreshed with sessions
-    pub branch_map: HashMap<String, String>,
     /// constant name -> command to run when opened
     pub constant_commands: HashMap<String, String>,
     /// sessions to restore on startup, loaded before refresh_sessions overwrites the file
@@ -140,7 +138,6 @@ impl App {
             ordering_items: Vec::new(),
             ordering_selected: 0,
             notes: load_notes(),
-            branch_map: HashMap::new(),
             constant_commands: load_constant_commands(),
             sessions_to_restore: load_saved_sessions(),
         }
@@ -525,21 +522,31 @@ impl App {
 
             let mut items: Vec<ListItem> = Vec::new();
             let mut selectable: Vec<usize> = Vec::new();
-            let mut emitted_dirs: HashSet<usize> = HashSet::new();
+            let mut last_dir: Option<usize> = None;
 
             let default_order: Vec<String>;
             let iteration_order: &[String] = if let Some(o) = order {
                 o
             } else {
-                default_order = name_set.iter().cloned().collect();
+                let mut sorted: Vec<String> = name_set.iter().cloned().collect();
+                sorted.sort_by(|a, b| {
+                    let da = ws_by_name.get(a).and_then(|(_, _, d)| d.as_ref().map(|(di, _)| *di)).unwrap_or(usize::MAX);
+                    let db = ws_by_name.get(b).and_then(|(_, _, d)| d.as_ref().map(|(di, _)| *di)).unwrap_or(usize::MAX);
+                    da.cmp(&db).then(
+                        ws_by_name.get(a).map(|(wi, _, _)| *wi).unwrap_or(usize::MAX)
+                            .cmp(&ws_by_name.get(b).map(|(wi, _, _)| *wi).unwrap_or(usize::MAX))
+                    )
+                });
+                default_order = sorted;
                 &default_order
             };
 
             for name in iteration_order {
                 if let Some((_wi, repo_item, dir)) = ws_by_name.remove(name) {
                     if let Some((di, dir_item)) = dir {
-                        if emitted_dirs.insert(di) {
+                        if last_dir != Some(di) {
                             items.push(dir_item);
+                            last_dir = Some(di);
                         }
                     }
                     selectable.push(items.len());
@@ -741,16 +748,6 @@ impl App {
             self.selected = self.selectable_indices.len().saturating_sub(1);
         }
 
-        // Rebuild branch map from display items (read .git/HEAD once per refresh, not per frame).
-        self.branch_map = self.display_items.iter()
-            .filter_map(|item| {
-                if let ListItem::TreeRepo { name, path, .. } = item {
-                    read_git_branch(path).map(|b| (name.clone(), b))
-                } else {
-                    None
-                }
-            })
-            .collect();
     }
 
     pub fn confirm_search(&mut self) {
@@ -1587,16 +1584,6 @@ fn save_notes(notes: &HashMap<String, String>) {
     lines.sort();
     let content = if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" };
     let _ = std::fs::write(&path, content);
-}
-
-pub fn read_git_branch(repo_path: &std::path::Path) -> Option<String> {
-    let head = std::fs::read_to_string(repo_path.join(".git/HEAD")).ok()?;
-    let head = head.trim();
-    if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
-        Some(branch.to_string())
-    } else {
-        head.get(..7).map(|s| s.to_string())
-    }
 }
 
 /// Spawn a background thread that runs `screen -ls`, `ps`, and workspace scan
