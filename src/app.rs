@@ -20,6 +20,7 @@ pub enum Mode {
     Ordering,
     ConstantOrdering,
     EditingNote,
+    EditingCommand,
 }
 
 pub enum Action {
@@ -988,6 +989,37 @@ impl App {
         self.mode = Mode::Normal;
     }
 
+    pub fn start_command_edit(&mut self) {
+        if let Some(name) = self.selected_item_name() {
+            if !self.constants.contains(&name) {
+                return;
+            }
+            self.create_input = self.constant_commands.get(&name).cloned().unwrap_or_default();
+            self.cursor_pos = self.create_input.chars().count();
+            self.mode = Mode::EditingCommand;
+        }
+    }
+
+    pub fn confirm_command(&mut self) {
+        if let Some(name) = self.selected_item_name() {
+            if self.create_input.is_empty() {
+                self.constant_commands.remove(&name);
+            } else {
+                self.constant_commands.insert(name, self.create_input.clone());
+            }
+            save_constant_commands(&self.constant_commands);
+        }
+        self.create_input.clear();
+        self.cursor_pos = 0;
+        self.mode = Mode::Normal;
+    }
+
+    pub fn cancel_command(&mut self) {
+        self.create_input.clear();
+        self.cursor_pos = 0;
+        self.mode = Mode::Normal;
+    }
+
     pub fn kill_all_throwaway(&mut self) {
         let throwaway: Vec<String> = self.all_sessions
             .iter()
@@ -1393,6 +1425,16 @@ fn load_constant_commands() -> HashMap<String, String> {
         }
     }
     map
+}
+
+fn save_constant_commands(commands: &HashMap<String, String>) {
+    let path = constant_commands_path();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let mut lines: Vec<String> = commands.iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
+    lines.sort();
+    let _ = std::fs::write(&path, lines.join("\n") + "\n");
 }
 
 fn history_path() -> PathBuf {

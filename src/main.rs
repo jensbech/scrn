@@ -332,6 +332,7 @@ fn run_picker(
                         KeyCode::Char('t') => app.create_throwaway(),
                         KeyCode::Char('d') => app.duplicate_session(),
                         KeyCode::Char('s') => app.start_note_edit(),
+                        KeyCode::Char('e') => app.start_command_edit(),
                         KeyCode::Char('O') => app.start_ordering(),
                         KeyCode::Char('R') => app.start_constant_ordering(),
                         KeyCode::Char(ch @ '1'..='9') => app.select_constant(ch as usize - '0' as usize),
@@ -400,6 +401,27 @@ fn run_picker(
                     Mode::EditingNote => match key.code {
                         KeyCode::Enter => app.confirm_note(),
                         KeyCode::Esc => app.cancel_note(),
+                        KeyCode::Left => {
+                            if app.cursor_pos > 0 {
+                                app.cursor_pos -= 1;
+                            }
+                        }
+                        KeyCode::Right => {
+                            if app.cursor_pos < app.create_input.chars().count() {
+                                app.cursor_pos += 1;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            input_backspace(&mut app.create_input, &mut app.cursor_pos);
+                        }
+                        KeyCode::Char(c) => {
+                            input_insert(&mut app.create_input, &mut app.cursor_pos, c);
+                        }
+                        _ => {}
+                    },
+                    Mode::EditingCommand => match key.code {
+                        KeyCode::Enter => app.confirm_command(),
+                        KeyCode::Esc => app.cancel_command(),
                         KeyCode::Left => {
                             if app.cursor_pos > 0 {
                                 app.cursor_pos -= 1;

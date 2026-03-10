@@ -184,6 +184,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             dim_background(f);
             draw_note_modal(f, app);
         }
+        Mode::EditingCommand => {
+            dim_background(f);
+            draw_command_modal(f, app);
+        }
         _ => {}
     }
 
@@ -572,15 +576,28 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     // Bottom border: key hints, status message, and/or filter indicator
     let mut bottom_left_spans: Vec<Span> = Vec::new();
 
+    let on_constant = app.selected_item_name()
+        .map(|n| app.constants.contains(&n))
+        .unwrap_or(false);
+
     let mut hints: Vec<(&str, &str)> = vec![
-        ("Enter","Attach"), ("c","Create"), ("t","Throwaway"), ("d","Duplicate"), ("n","Rename"), ("x","Kill"), ("p","Pin"), ("C","Constant"), ("s","Note"), ("/","Search"), ("q","Quit"),
+        ("\u{23ce}","Attach"), ("c","Create"), ("/","Search"), ("q","Quit"),
     ];
+    hints.push(("p","Pin"));
+    hints.push(("C","Const"));
+    if on_constant {
+        hints.push(("e", "Cmd"));
+    }
+    hints.push(("s","Note"));
+    hints.push(("x","Kill"));
+    let mut extra: Vec<&str> = vec!["n", "t", "d"];
     if app.workspace_tree.as_ref().is_some_and(|t| t.children.iter().any(|c| !c.is_repo)) {
-        hints.push(("O", "Order"));
+        extra.push("O");
     }
     if !app.constants.is_empty() {
-        hints.push(("R", "Reorder"));
+        extra.push("R");
     }
+
     for (i, (key, desc)) in hints.iter().enumerate() {
         if i > 0 {
             bottom_left_spans.push(Span::styled(" ", Style::default().fg(DIM).bg(BASE_BG)));
@@ -592,6 +609,13 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         bottom_left_spans.push(Span::styled(
             format!(" {desc}"),
             Style::default().fg(DIM).bg(BASE_BG),
+        ));
+    }
+    if !extra.is_empty() {
+        bottom_left_spans.push(Span::styled("  ", Style::default().bg(BASE_BG)));
+        bottom_left_spans.push(Span::styled(
+            extra.join(" "),
+            Style::default().fg(ACCENT).bg(BASE_BG),
         ));
     }
     block = block.title_bottom(Line::from(bottom_left_spans));
@@ -1133,6 +1157,50 @@ fn draw_note_modal(f: &mut Frame, app: &App) {
         Line::from(Span::styled(
             format!(" {display}"),
             Style::default().fg(NOTE_FG).bg(MODAL_BG).add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
+        inner,
+    );
+}
+
+fn draw_command_modal(f: &mut Frame, app: &App) {
+    let name = app.selected_item_name().unwrap_or_default();
+    let area = f.area();
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            format!(" Command: {name} "),
+            Style::default().fg(MODAL_TITLE).bg(MODAL_BG).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " Enter save  Esc cancel  Backspace clear ",
+            Style::default().fg(DIM).bg(MODAL_BG),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let max_chars = inner.width.saturating_sub(2) as usize;
+    let display = visible_input(&app.create_input, app.cursor_pos, max_chars);
+
+    let lines = vec![
+        Line::from(Span::styled(" Run on open:", Style::default().fg(DIM).bg(MODAL_BG))),
+        Line::from(Span::styled(
+            format!(" {display}"),
+            Style::default().fg(ACCENT).bg(MODAL_BG).add_modifier(Modifier::BOLD),
         )),
     ];
 
