@@ -44,7 +44,6 @@ const PIN_BG: Color = Color::Rgb(22, 20, 30);
 const PIN_ZEBRA_BG: Color = Color::Rgb(33, 30, 46);
 const REPO_FG: Color = Color::Rgb(180, 180, 200);
 const NOTE_FG: Color = Color::Rgb(200, 175, 110);
-const BRANCH_FG: Color = Color::Rgb(90, 90, 108);
 const TREE_GUIDE: Color = Color::Rgb(55, 55, 75);
 
 fn split_at_char_pos(s: &str, pos: usize) -> (&str, &str) {
@@ -232,13 +231,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         max as u16
     };
 
-    let max_branch_chars = app.branch_map.values()
-        .map(|b| b.chars().count())
-        .max()
-        .unwrap_or(0) as u16;
-
-    // fixed_base excludes branch — branch is sized from leftover space (lowest priority).
-    let fixed_base = NOTE_W + (COL_SPACING * 3) + BORDERS + HIGHLIGHT_SYM;
+    let fixed_base = NOTE_W + (COL_SPACING * 2) + BORDERS + HIGHLIGHT_SYM;
     let available = area.width.saturating_sub(fixed_base);
 
     let (name_w, proc_w) = if max_name_chars + max_proc_chars <= available {
@@ -250,13 +243,8 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         (nw, pw)
     };
 
-    // Branch gets whatever is left after name + proc + note + their spacings.
-    let used = BORDERS + HIGHLIGHT_SYM + name_w + proc_w + NOTE_W + COL_SPACING * 3;
-    let branch_w = if area.width > used + COL_SPACING {
-        max_branch_chars.min(area.width - used - COL_SPACING)
-    } else {
-        0
-    };
+    let used = BORDERS + HIGHLIGHT_SYM + name_w + proc_w + COL_SPACING * 2;
+    let note_w = if area.width > used { area.width - used } else { NOTE_W }.max(NOTE_W);
 
     let name_chars = name_w as usize;
 
@@ -265,12 +253,11 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .bg(BASE_BG)
         .add_modifier(Modifier::BOLD);
 
-    let mut header_cells = vec![
+    let header_cells = vec![
         Cell::from("Name"),
         Cell::from("Process"),
         Cell::from("Note"),
     ];
-    if branch_w > 0 { header_cells.push(Cell::from("Branch")); }
     let header = Row::new(header_cells)
     .style(header_style)
     .bottom_margin(1);
@@ -296,7 +283,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(_i, item)| match item {
             ListItem::SectionHeader(title) => {
                 let full_width_name = format!(" \u{2500} {title}");
-                let mut cells = vec![
+                let cells = vec![
                     Cell::from(Line::from(Span::styled(
                         full_width_name,
                         Style::default()
@@ -307,15 +294,13 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                 ];
-                if branch_w > 0 { cells.push(Cell::from(Span::styled("", Style::default().bg(BASE_BG)))); }
                 Row::new(cells).style(Style::default().fg(SECTION_FG).bg(BASE_BG))
             }
             ListItem::Separator => {
                 let line_char = "\u{2500}"; // ─
-                let branch_extra = if branch_w > 0 { branch_w + COL_SPACING } else { 0 };
-                let total_w = (name_w + proc_w + NOTE_W + COL_SPACING * 2 + branch_extra) as usize;
+                let total_w = (name_w + proc_w + note_w + COL_SPACING * 2) as usize;
                 let line_str: String = line_char.repeat(total_w);
-                let mut cells = vec![
+                let cells = vec![
                     Cell::from(Span::styled(
                         line_str,
                         Style::default().fg(BORDER_FG).bg(BASE_BG),
@@ -323,7 +308,6 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                 ];
-                if branch_w > 0 { cells.push(Cell::from(Span::styled("", Style::default().bg(BASE_BG)))); }
                 Row::new(cells)
                     .style(Style::default().fg(BORDER_FG).bg(BASE_BG))
                     .bottom_margin(1)
@@ -345,12 +329,11 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                         .bg(BASE_BG)
                         .add_modifier(Modifier::DIM),
                 ));
-                let mut cells = vec![
+                let cells = vec![
                     Cell::from(Line::from(spans)),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                 ];
-                if branch_w > 0 { cells.push(Cell::from(Span::styled("", Style::default().bg(BASE_BG)))); }
                 Row::new(cells).style(Style::default().fg(SECTION_FG).bg(BASE_BG))
             }
             ListItem::TreeRepo {
@@ -440,20 +423,14 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 };
 
                 let note_text = app.notes.get(name)
-                    .map(|n| truncate(n, NOTE_W as usize))
+                    .map(|n| truncate(n, note_w as usize))
                     .unwrap_or_default();
 
-                let mut cells = vec![
+                let cells = vec![
                     name_cell,
                     proc_cell,
                     Cell::from(Span::styled(note_text, Style::default().fg(NOTE_FG).bg(bg))),
                 ];
-                if branch_w > 0 {
-                    let branch_text = app.branch_map.get(name)
-                        .map(|b| truncate(b, branch_w as usize))
-                        .unwrap_or_default();
-                    cells.push(Cell::from(Span::styled(branch_text, Style::default().fg(BRANCH_FG).bg(bg))));
-                }
                 Row::new(cells).style(Style::default().fg(FG).bg(bg))
             }
             ListItem::SessionItem(session) => {
@@ -554,28 +531,24 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 };
 
                 let note_text = app.notes.get(&session.name)
-                    .map(|n| truncate(n, NOTE_W as usize))
+                    .map(|n| truncate(n, note_w as usize))
                     .unwrap_or_default();
 
-                let mut cells = vec![
+                let cells = vec![
                     name_cell,
                     proc_cell,
                     Cell::from(Span::styled(note_text, Style::default().fg(NOTE_FG).bg(bg))),
                 ];
-                if branch_w > 0 {
-                    cells.push(Cell::from(Span::styled("", Style::default().bg(bg))));
-                }
                 Row::new(cells).style(Style::default().fg(FG).bg(bg))
             }
         })
         .collect();
 
-    let mut widths_vec = vec![
+    let widths_vec = vec![
         Constraint::Length(name_w),
         Constraint::Length(proc_w),
-        Constraint::Length(NOTE_W),
+        Constraint::Length(note_w),
     ];
-    if branch_w > 0 { widths_vec.push(Constraint::Length(branch_w)); }
 
     let mut block = Block::default()
         .borders(Borders::ALL)
@@ -1174,13 +1147,13 @@ fn draw_note_modal(f: &mut Frame, app: &App) {
 fn draw_ordering_modal(f: &mut Frame, app: &App) {
     let area = f.area();
     let n = app.ordering_items.len() as u16;
-    let height = (n + 2).min(area.height.saturating_sub(4));
+    let height = (n * 2 + 3).min(area.height.saturating_sub(4));
     let width = app.ordering_items.iter()
         .map(|s| s.chars().count() as u16)
         .max()
         .unwrap_or(20)
         .max(28)
-        .saturating_add(6)
+        .saturating_add(10)
         .min(area.width.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
@@ -1204,16 +1177,19 @@ fn draw_ordering_modal(f: &mut Frame, app: &App) {
     let inner = block.inner(modal_area);
     f.render_widget(block, modal_area);
 
-    let lines: Vec<Line> = app.ordering_items.iter().enumerate().map(|(i, name)| {
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+    for (i, name) in app.ordering_items.iter().enumerate() {
         let selected = i == app.ordering_selected;
         let bg = if selected { HIGHLIGHT_BG } else { MODAL_BG };
         let fg = if selected { FG_BRIGHT } else { FG };
-        let prefix = if selected { " \u{2588} " } else { "   " };
-        Line::from(vec![
+        let prefix = if selected { "  \u{2588} " } else { "    " };
+        lines.push(Line::from(vec![
             Span::styled(prefix, Style::default().fg(ACCENT).bg(bg)),
             Span::styled(name.clone(), Style::default().fg(fg).bg(bg)),
-        ])
-    }).collect();
+        ]));
+        lines.push(Line::from(""));
+    }
 
     f.render_widget(
         Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
@@ -1224,13 +1200,13 @@ fn draw_ordering_modal(f: &mut Frame, app: &App) {
 fn draw_constant_ordering_modal(f: &mut Frame, app: &App) {
     let area = f.area();
     let n = app.ordering_items.len() as u16;
-    let height = (n + 2).min(area.height.saturating_sub(4));
+    let height = (n * 2 + 3).min(area.height.saturating_sub(4));
     let width = app.ordering_items.iter()
         .map(|s| s.chars().count() as u16)
         .max()
         .unwrap_or(20)
         .max(30)
-        .saturating_add(8)
+        .saturating_add(12)
         .min(area.width.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
@@ -1254,17 +1230,20 @@ fn draw_constant_ordering_modal(f: &mut Frame, app: &App) {
     let inner = block.inner(modal_area);
     f.render_widget(block, modal_area);
 
-    let lines: Vec<Line> = app.ordering_items.iter().enumerate().map(|(i, name)| {
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+    for (i, name) in app.ordering_items.iter().enumerate() {
         let selected = i == app.ordering_selected;
         let bg = if selected { HIGHLIGHT_BG } else { MODAL_BG };
         let fg = if selected { FG_BRIGHT } else { FG };
         let num = if i < 9 { format!("{}", i + 1) } else { " ".to_string() };
-        let prefix = if selected { format!("{} \u{2588} ", num) } else { format!("{}   ", num) };
-        Line::from(vec![
+        let prefix = if selected { format!(" {} \u{2588} ", num) } else { format!(" {}   ", num) };
+        lines.push(Line::from(vec![
             Span::styled(prefix, Style::default().fg(if selected { ACCENT } else { DIM }).bg(bg)),
             Span::styled(name.clone(), Style::default().fg(fg).bg(bg)),
-        ])
-    }).collect();
+        ]));
+        lines.push(Line::from(""));
+    }
 
     f.render_widget(
         Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),

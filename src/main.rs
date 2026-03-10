@@ -126,10 +126,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match action {
             Action::Attach(ref pid_name) => {
-                // Yield terminal to screen, re-take it immediately on return
                 yield_terminal(&mut terminal)?;
 
-                // Inject keybinding + flow control into existing sessions in parallel
                 let pn1 = pid_name.clone();
                 let pn2 = pid_name.clone();
                 let t1 = std::thread::spawn(move || {
@@ -144,12 +142,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
                 t1.join().ok();
                 t2.join().ok();
+
+                let session_name = pid_name.split('.').nth(1).unwrap_or(pid_name);
+                if let Some(cmd) = app.constant_command(session_name) {
+                    let stuff = format!("{}\n", cmd);
+                    let _ = Command::new("screen")
+                        .args(["-S", pid_name, "-X", "stuff", &stuff])
+                        .status();
+                }
+
                 let rc = screen::ensure_screenrc();
                 let _ = Command::new("screen")
                     .args(["-c", &rc, "-d", "-r", pid_name])
                     .status();
 
-                // Reclaim terminal before anything else — eliminates the flash
                 reclaim_terminal(&mut terminal)?;
                 app.action = Action::None;
                 pending_refresh = Some(app::spawn_refresh(
@@ -157,26 +163,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.dir_order.clone(),
                 ));
             }
-            Action::Create(ref name, Some(ref dir)) => {
+            Action::Create(ref name, ref maybe_dir) => {
                 yield_terminal(&mut terminal)?;
                 let rc = screen::ensure_screenrc();
-                let _ = Command::new("screen")
-                    .args(["-c", &rc, "-S", name])
-                    .current_dir(dir)
-                    .status();
-                reclaim_terminal(&mut terminal)?;
-                app.action = Action::None;
-                pending_refresh = Some(app::spawn_refresh(
-                    app.workspace_dir.clone(),
-                    app.dir_order.clone(),
-                ));
-            }
-            Action::Create(ref name, None) => {
-                yield_terminal(&mut terminal)?;
-                let rc = screen::ensure_screenrc();
-                let _ = Command::new("screen")
-                    .args(["-c", &rc, "-S", name])
-                    .status();
+
+                let has_command = app.constant_command(name).is_some();
+
+                if has_command {
+                    let mut cmd = Command::new("screen");
+                    cmd.args(["-c", &rc, "-dmS", name]);
+                    if let Some(ref dir) = maybe_dir {
+                        cmd.current_dir(dir);
+                    }
+                    let _ = cmd.status();
+
+                    if let Some(c) = app.constant_command(name) {
+                        let stuff = format!("{}\n", c);
+                        let _ = Command::new("screen")
+                            .args(["-S", name, "-X", "stuff", &stuff])
+                            .status();
+                    }
+
+                    let _ = Command::new("screen")
+                        .args(["-c", &rc, "-r", name])
+                        .status();
+                } else {
+                    let mut cmd = Command::new("screen");
+                    cmd.args(["-c", &rc, "-S", name]);
+                    if let Some(ref dir) = maybe_dir {
+                        cmd.current_dir(dir);
+                    }
+                    let _ = cmd.status();
+                }
+
                 reclaim_terminal(&mut terminal)?;
                 app.action = Action::None;
                 pending_refresh = Some(app::spawn_refresh(

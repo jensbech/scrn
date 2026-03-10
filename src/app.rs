@@ -96,6 +96,8 @@ pub struct App {
     pub notes: HashMap<String, String>,
     /// repo name -> current git branch, refreshed with sessions
     pub branch_map: HashMap<String, String>,
+    /// constant name -> command to run when opened
+    pub constant_commands: HashMap<String, String>,
     /// sessions to restore on startup, loaded before refresh_sessions overwrites the file
     sessions_to_restore: Vec<(String, Option<PathBuf>)>,
 }
@@ -138,6 +140,7 @@ impl App {
             ordering_selected: 0,
             notes: load_notes(),
             branch_map: HashMap::new(),
+            constant_commands: load_constant_commands(),
             sessions_to_restore: load_saved_sessions(),
         }
     }
@@ -940,6 +943,14 @@ impl App {
         }
     }
 
+    pub fn constant_command(&self, session_name: &str) -> Option<&str> {
+        if self.constants.contains(&session_name.to_string()) {
+            self.constant_commands.get(session_name).map(|s| s.as_str())
+        } else {
+            None
+        }
+    }
+
     pub fn selected_item_name(&self) -> Option<String> {
         let visual_idx = *self.selectable_indices.get(self.selected)?;
         match self.display_items.get(visual_idx)? {
@@ -1351,6 +1362,37 @@ fn save_constants(constants: &[String]) {
     let _ = std::fs::create_dir_all(path.parent().unwrap());
     let lines: Vec<&str> = constants.iter().map(|s| s.as_str()).collect();
     let _ = std::fs::write(&path, lines.join("\n") + "\n");
+}
+
+fn constant_commands_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("scrn")
+        .join("constant_commands")
+}
+
+fn load_constant_commands() -> HashMap<String, String> {
+    let path = constant_commands_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let mut map = HashMap::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((name, cmd)) = line.split_once('=') {
+            let name = name.trim();
+            let cmd = cmd.trim();
+            if !name.is_empty() && !cmd.is_empty() {
+                map.insert(name.to_string(), cmd.to_string());
+            }
+        }
+    }
+    map
 }
 
 fn history_path() -> PathBuf {
