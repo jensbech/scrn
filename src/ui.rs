@@ -581,22 +581,21 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(false);
 
     let mut hints: Vec<(&str, &str)> = vec![
-        ("\u{23ce}","Attach"), ("c","Create"), ("/","Search"), ("q","Quit"),
+        ("\u{23ce}","Attach"), ("c","New"), ("x","Kill"), ("p","Pin"), ("C","Const"),
     ];
-    hints.push(("p","Pin"));
-    hints.push(("C","Const"));
     if on_constant {
         hints.push(("e", "Cmd"));
     }
     hints.push(("s","Note"));
-    hints.push(("x","Kill"));
-    let mut extra: Vec<&str> = vec!["n", "t", "d"];
+    hints.push(("n","Rename"));
     if app.workspace_tree.as_ref().is_some_and(|t| t.children.iter().any(|c| !c.is_repo)) {
-        extra.push("O");
+        hints.push(("O", "Order"));
     }
     if !app.constants.is_empty() {
-        extra.push("R");
+        hints.push(("R", "Reorder"));
     }
+    hints.push(("/","Search"));
+    hints.push(("q","Quit"));
 
     for (i, (key, desc)) in hints.iter().enumerate() {
         if i > 0 {
@@ -609,13 +608,6 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         bottom_left_spans.push(Span::styled(
             format!(" {desc}"),
             Style::default().fg(DIM).bg(BASE_BG),
-        ));
-    }
-    if !extra.is_empty() {
-        bottom_left_spans.push(Span::styled("  ", Style::default().bg(BASE_BG)));
-        bottom_left_spans.push(Span::styled(
-            extra.join(" "),
-            Style::default().fg(ACCENT).bg(BASE_BG),
         ));
     }
     block = block.title_bottom(Line::from(bottom_left_spans));
