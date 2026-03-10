@@ -314,6 +314,8 @@ fn run_picker(
                         KeyCode::Char('d') => app.duplicate_session(),
                         KeyCode::Char('s') => app.start_note_edit(),
                         KeyCode::Char('O') => app.start_ordering(),
+                        KeyCode::Char('R') => app.start_constant_ordering(),
+                        KeyCode::Char(ch @ '1'..='9') => app.select_constant(ch as usize - '0' as usize),
                         _ => {}
                     },
                     Mode::Searching => match key.code {
@@ -456,6 +458,33 @@ fn run_picker(
                         }
                         KeyCode::Enter => app.confirm_ordering(),
                         KeyCode::Esc => app.cancel_ordering(),
+                        _ => {}
+                    },
+                    Mode::ConstantOrdering => match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if app.ordering_selected + 1 < app.ordering_items.len() {
+                                app.ordering_selected += 1;
+                            }
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            if app.ordering_selected > 0 {
+                                app.ordering_selected -= 1;
+                            }
+                        }
+                        KeyCode::Char('J') => {
+                            if app.ordering_selected + 1 < app.ordering_items.len() {
+                                app.ordering_items.swap(app.ordering_selected, app.ordering_selected + 1);
+                                app.ordering_selected += 1;
+                            }
+                        }
+                        KeyCode::Char('K') => {
+                            if app.ordering_selected > 0 {
+                                app.ordering_items.swap(app.ordering_selected, app.ordering_selected - 1);
+                                app.ordering_selected -= 1;
+                            }
+                        }
+                        KeyCode::Enter => app.confirm_constant_ordering(),
+                        KeyCode::Esc => app.cancel_constant_ordering(),
                         _ => {}
                     },
                 },

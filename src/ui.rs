@@ -177,6 +177,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             dim_background(f);
             draw_ordering_modal(f, app);
         }
+        Mode::ConstantOrdering => {
+            dim_background(f);
+            draw_constant_ordering_modal(f, app);
+        }
         Mode::EditingNote => {
             dim_background(f);
             draw_note_modal(f, app);
@@ -356,15 +360,19 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 prefix,
                 ..
             } => {
-                let bg = if app.constants.contains(name) {
+                let const_idx = app.constants.iter().position(|n| n == name);
+                let bg = if const_idx.is_some() {
                     if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
                 } else if app.pins.contains(name) {
                     if selectable_row_idx % 2 == 1 { PIN_ZEBRA_BG } else { PIN_BG }
                 } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
 
-                let margin = "  ";
-                let avail = name_chars.saturating_sub(margin.len() + prefix.chars().count());
+                let hotkey_prefix = const_idx
+                    .filter(|&i| i < 9)
+                    .map(|i| format!("{} ", i + 1))
+                    .unwrap_or_else(|| "  ".to_string());
+                let avail = name_chars.saturating_sub(hotkey_prefix.len() + prefix.chars().count());
                 let name_text = truncate(name, avail);
                 let has_session = session.is_some();
                 let name_fg = if has_session { GREEN } else { REPO_FG };
@@ -375,7 +383,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                         let highlight_set: std::collections::HashSet<usize> =
                             positions.into_iter().filter(|&p| p < max_pos).collect();
                         let mut spans = vec![
-                            Span::styled(margin.to_string(), Style::default().fg(name_fg).bg(bg)),
+                            Span::styled(hotkey_prefix.clone(), Style::default().fg(DIM).bg(bg)),
                             Span::styled(prefix.clone(), Style::default().fg(TREE_GUIDE).bg(bg)),
                         ];
                         let normal_style = Style::default().fg(name_fg).bg(bg);
@@ -403,7 +411,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                         Cell::from(Line::from(spans))
                     } else {
                         let mut spans = vec![
-                            Span::styled(margin.to_string(), Style::default().fg(name_fg).bg(bg)),
+                            Span::styled(hotkey_prefix.clone(), Style::default().fg(DIM).bg(bg)),
                             Span::styled(prefix.clone(), Style::default().fg(TREE_GUIDE).bg(bg)),
                         ];
                         spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
@@ -411,7 +419,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     }
                 } else {
                     let mut spans = vec![
-                        Span::styled(margin.to_string(), Style::default().fg(name_fg).bg(bg)),
+                        Span::styled(hotkey_prefix.clone(), Style::default().fg(DIM).bg(bg)),
                         Span::styled(prefix.clone(), Style::default().fg(TREE_GUIDE).bg(bg)),
                     ];
                     spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
@@ -452,15 +460,22 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 let is_current = app.is_current_session(session);
                 let is_throwaway = session.name.starts_with("tmp-");
 
-                let bg = if app.constants.contains(&session.name) {
+                let const_idx = app.constants.iter().position(|n| n == &session.name);
+                let bg = if const_idx.is_some() {
                     if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
                 } else if app.pins.contains(&session.name) {
                     if selectable_row_idx % 2 == 1 { PIN_ZEBRA_BG } else { PIN_BG }
                 } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
+                let is_inactive_const = const_idx.is_some() && session.pid_name.is_empty();
                 let is_companion = !is_current && !is_throwaway && session.name.ends_with("-2");
-                let name_fg = if is_current { ACCENT } else if is_throwaway { DIM } else { GREEN };
-                let prefix = if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else if is_companion { " \u{21b3} " } else { "  " };
+                let name_fg = if is_inactive_const { DIM } else if is_current { ACCENT } else if is_throwaway { DIM } else { GREEN };
+                let hotkey_prefix = const_idx
+                    .filter(|&i| i < 9)
+                    .map(|i| format!("{} ", i + 1));
+                let prefix = if let Some(ref hp) = hotkey_prefix {
+                    hp.as_str()
+                } else if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else if is_companion { " \u{21b3} " } else { "  " };
                 let avail = name_chars.saturating_sub(prefix.chars().count());
                 let display_name = if name_counts.get(&session.name).copied().unwrap_or(0) > 1 {
                     let seen = name_seen.entry(session.name.clone()).or_insert(0);
@@ -589,6 +604,9 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     ];
     if app.workspace_tree.as_ref().is_some_and(|t| t.children.iter().any(|c| !c.is_repo)) {
         hints.push(("O", "Order"));
+    }
+    if !app.constants.is_empty() {
+        hints.push(("R", "Reorder"));
     }
     for (i, (key, desc)) in hints.iter().enumerate() {
         if i > 0 {
@@ -1203,4 +1221,54 @@ fn draw_ordering_modal(f: &mut Frame, app: &App) {
     );
 }
 
+fn draw_constant_ordering_modal(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let n = app.ordering_items.len() as u16;
+    let height = (n + 2).min(area.height.saturating_sub(4));
+    let width = app.ordering_items.iter()
+        .map(|s| s.chars().count() as u16)
+        .max()
+        .unwrap_or(20)
+        .max(30)
+        .saturating_add(8)
+        .min(area.width.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            " Order Constants ",
+            Style::default().fg(MODAL_TITLE).bg(MODAL_BG).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from(Span::styled(
+            " K\u{2191} J\u{2193} move  Enter save  Esc cancel ",
+            Style::default().fg(DIM).bg(MODAL_BG),
+        )));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let lines: Vec<Line> = app.ordering_items.iter().enumerate().map(|(i, name)| {
+        let selected = i == app.ordering_selected;
+        let bg = if selected { HIGHLIGHT_BG } else { MODAL_BG };
+        let fg = if selected { FG_BRIGHT } else { FG };
+        let num = if i < 9 { format!("{}", i + 1) } else { " ".to_string() };
+        let prefix = if selected { format!("{} \u{2588} ", num) } else { format!("{}   ", num) };
+        Line::from(vec![
+            Span::styled(prefix, Style::default().fg(if selected { ACCENT } else { DIM }).bg(bg)),
+            Span::styled(name.clone(), Style::default().fg(fg).bg(bg)),
+        ])
+    }).collect();
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
+        inner,
+    );
+}
 

@@ -18,6 +18,7 @@ pub enum Mode {
     ConfirmKillAll2,
     ConfirmQuit,
     Ordering,
+    ConstantOrdering,
     EditingNote,
 }
 
@@ -82,8 +83,8 @@ pub struct App {
     pub filter_opened: bool,
     /// pinned session/repo names — always shown at top
     pub pins: HashSet<String>,
-    /// constant session/repo names — always shown above pinned
-    pub constants: HashSet<String>,
+    /// constant session/repo names — always shown above pinned, order preserved
+    pub constants: Vec<String>,
     pub table_data_y: u16,
     pub table_data_end_y: u16,
     pub table_scroll_offset: usize,
@@ -287,8 +288,8 @@ impl App {
                 self.set_status(format!("Unpinned '{name}'"));
             } else {
                 self.pins.insert(name.clone());
-                // Mutual exclusivity: remove from constants if present
-                if self.constants.remove(&name) {
+                if let Some(pos) = self.constants.iter().position(|n| n == &name) {
+                    self.constants.remove(pos);
                     save_constants(&self.constants);
                 }
                 self.set_status(format!("Pinned '{name}'"));
@@ -316,11 +317,11 @@ impl App {
 
     pub fn confirm_constant(&mut self) {
         if let Some(name) = self.constant_target.take() {
-            if self.constants.contains(&name) {
-                self.constants.remove(&name);
+            if let Some(pos) = self.constants.iter().position(|n| n == &name) {
+                self.constants.remove(pos);
                 self.set_status(format!("Removed from constants '{name}'"));
             } else {
-                self.constants.insert(name.clone());
+                self.constants.push(name.clone());
                 if self.pins.remove(&name) {
                     save_pins(&self.pins);
                 }
@@ -473,20 +474,24 @@ impl App {
             }
         }
 
-        // Helper: extract items matching a name set from ws_items and orphan_items
-        // Returns (extracted_items, extracted_selectable, ws_indices_to_remove, orphan_indices_to_remove)
         fn extract_section(
             name_set: &HashSet<String>,
             ws_items: &[ListItem],
             orphan_items: &[ListItem],
         ) -> (Vec<ListItem>, Vec<usize>, HashSet<usize>, HashSet<usize>) {
-            let mut items: Vec<ListItem> = Vec::new();
-            let mut selectable: Vec<usize> = Vec::new();
+            extract_ordered_section(None, name_set, ws_items, orphan_items)
+        }
+
+        fn extract_ordered_section(
+            order: Option<&[String]>,
+            name_set: &HashSet<String>,
+            ws_items: &[ListItem],
+            orphan_items: &[ListItem],
+        ) -> (Vec<ListItem>, Vec<usize>, HashSet<usize>, HashSet<usize>) {
             let mut ws_remove: HashSet<usize> = HashSet::new();
             let mut orphan_remove: HashSet<usize> = HashSet::new();
 
-            // Find matching ws repos and track their TreeDir parents
-            let mut needed_dir_indices: HashSet<usize> = HashSet::new();
+            let mut ws_by_name: HashMap<String, (usize, ListItem, Option<(usize, ListItem)>)> = HashMap::new();
             let mut last_dir_idx: Option<usize> = None;
             for (i, item) in ws_items.iter().enumerate() {
                 match item {
@@ -496,33 +501,57 @@ impl App {
                     ListItem::TreeRepo { name, .. } => {
                         if name_set.contains(name.as_str()) {
                             ws_remove.insert(i);
-                            if let Some(dir_idx) = last_dir_idx {
-                                needed_dir_indices.insert(dir_idx);
-                            }
+                            let dir = last_dir_idx.map(|di| (di, ws_items[di].clone()));
+                            ws_by_name.insert(name.clone(), (i, item.clone(), dir));
                         }
                     }
                     _ => {}
                 }
             }
 
-            // Build items preserving tree order (dirs + repos)
-            for (i, item) in ws_items.iter().enumerate() {
-                if needed_dir_indices.contains(&i) {
-                    items.push(item.clone());
-                } else if ws_remove.contains(&i) {
-                    selectable.push(items.len());
-                    items.push(item.clone());
-                }
-            }
-
-            // Extract matching SessionItems from orphan_items
+            let mut orphan_by_name: HashMap<String, (usize, ListItem)> = HashMap::new();
             for (i, item) in orphan_items.iter().enumerate() {
                 if let ListItem::SessionItem(session) = item {
                     if name_set.contains(session.name.as_str()) {
                         orphan_remove.insert(i);
-                        selectable.push(items.len());
-                        items.push(item.clone());
+                        orphan_by_name.insert(session.name.clone(), (i, item.clone()));
                     }
+                }
+            }
+
+            let mut items: Vec<ListItem> = Vec::new();
+            let mut selectable: Vec<usize> = Vec::new();
+            let mut emitted_dirs: HashSet<usize> = HashSet::new();
+
+            let default_order: Vec<String>;
+            let iteration_order: &[String] = if let Some(o) = order {
+                o
+            } else {
+                default_order = name_set.iter().cloned().collect();
+                &default_order
+            };
+
+            for name in iteration_order {
+                if let Some((_wi, repo_item, dir)) = ws_by_name.remove(name) {
+                    if let Some((di, dir_item)) = dir {
+                        if emitted_dirs.insert(di) {
+                            items.push(dir_item);
+                        }
+                    }
+                    selectable.push(items.len());
+                    items.push(repo_item);
+                } else if let Some((_oi, session_item)) = orphan_by_name.remove(name) {
+                    selectable.push(items.len());
+                    items.push(session_item);
+                } else if order.is_some() {
+                    selectable.push(items.len());
+                    items.push(ListItem::SessionItem(crate::screen::Session {
+                        name: name.clone(),
+                        pid_name: String::new(),
+                        state: crate::screen::SessionState::Detached,
+                        created: None,
+                        idle_secs: None,
+                    }));
                 }
             }
 
@@ -550,10 +579,9 @@ impl App {
             }
         }
 
-        // Extract constants section (highest priority, claimed first)
-        let constants = &self.constants;
+        let const_set: HashSet<String> = self.constants.iter().cloned().collect();
         let (const_items, const_selectable, const_ws_remove, const_orphan_remove) =
-            extract_section(constants, &ws_items, &orphan_items);
+            extract_ordered_section(Some(&self.constants), &const_set, &ws_items, &orphan_items);
 
         // Remove constant items from ws/orphan groups
         if !const_ws_remove.is_empty() {
@@ -749,7 +777,11 @@ impl App {
         match item {
             ListItem::SessionItem(session) => {
                 self.record_opened(&session.name);
-                self.action = Action::Attach(session.pid_name);
+                if session.pid_name.is_empty() {
+                    self.action = Action::Create(session.name, None);
+                } else {
+                    self.action = Action::Attach(session.pid_name);
+                }
             }
             ListItem::TreeRepo { name, path, session, .. } => {
                 if let Some(session) = session {
@@ -867,6 +899,45 @@ impl App {
 
     pub fn cancel_ordering(&mut self) {
         self.mode = Mode::Normal;
+    }
+
+    pub fn start_constant_ordering(&mut self) {
+        if self.constants.is_empty() {
+            return;
+        }
+        self.ordering_items = self.constants.clone();
+        self.ordering_selected = 0;
+        self.mode = Mode::ConstantOrdering;
+    }
+
+    pub fn confirm_constant_ordering(&mut self) {
+        self.constants = self.ordering_items.clone();
+        save_constants(&self.constants);
+        self.rebuild_display_list();
+        self.mode = Mode::Normal;
+    }
+
+    pub fn cancel_constant_ordering(&mut self) {
+        self.mode = Mode::Normal;
+    }
+
+    pub fn select_constant(&mut self, n: usize) {
+        if n == 0 || n > self.constants.len() {
+            return;
+        }
+        let target_name = &self.constants[n - 1];
+        for (sel_idx, &disp_idx) in self.selectable_indices.iter().enumerate() {
+            let name = match self.display_items.get(disp_idx) {
+                Some(ListItem::TreeRepo { name, .. }) => name,
+                Some(ListItem::SessionItem(s)) => &s.name,
+                _ => continue,
+            };
+            if name == target_name {
+                self.selected = sel_idx;
+                self.select_for_attach();
+                return;
+            }
+        }
     }
 
     pub fn selected_item_name(&self) -> Option<String> {
@@ -1262,11 +1333,11 @@ fn constants_path() -> PathBuf {
         .join("constants")
 }
 
-fn load_constants() -> HashSet<String> {
+fn load_constants() -> Vec<String> {
     let path = constants_path();
     let contents = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return HashSet::new(),
+        Err(_) => return Vec::new(),
     };
     contents
         .lines()
@@ -1275,11 +1346,10 @@ fn load_constants() -> HashSet<String> {
         .collect()
 }
 
-fn save_constants(constants: &HashSet<String>) {
+fn save_constants(constants: &[String]) {
     let path = constants_path();
     let _ = std::fs::create_dir_all(path.parent().unwrap());
-    let mut lines: Vec<&str> = constants.iter().map(|s| s.as_str()).collect();
-    lines.sort();
+    let lines: Vec<&str> = constants.iter().map(|s| s.as_str()).collect();
     let _ = std::fs::write(&path, lines.join("\n") + "\n");
 }
 
