@@ -226,7 +226,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         let mut max = MIN_NAME_W as usize;
         for item in &app.display_items {
             let n = match item {
-                ListItem::SessionItem(s) => s.name.chars().count() + 3, // widest prefix " ↳ "
+                ListItem::SessionItem(s) => s.name.chars().count() + 5, // widest prefix "   ↳ "
                 ListItem::TreeRepo { name, prefix, .. } => name.chars().count() + 2 + prefix.chars().count(),
                 _ => continue,
             };
@@ -343,7 +343,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             ListItem::TreeRepo {
                 name,
                 session,
-                companion,
+                companions,
                 prefix,
                 ..
             } => {
@@ -413,7 +413,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(Line::from(spans))
                 };
 
-                let _ = companion; // companion is shown as a separate selectable row below
+                let _ = companions;
 
                 let proc_text = truncate(
                     &session.as_ref().map(|s| app.session_proc(&s.pid_name).to_string()).unwrap_or_default(),
@@ -449,14 +449,14 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 selectable_row_idx += 1;
                 let is_inactive_const = const_idx.is_some() && session.pid_name.is_empty();
-                let is_companion = !is_current && !is_throwaway && session.name.ends_with("-2");
+                let is_companion = !is_current && !is_throwaway && (2..=9).any(|n| session.name.ends_with(&format!("-{n}")));
                 let name_fg = if is_inactive_const { DIM } else if is_current { ACCENT } else if is_throwaway { DIM } else { GREEN };
                 let hotkey_prefix = const_idx
                     .filter(|&i| i < 9)
                     .map(|i| format!("{} ", i + 1));
                 let prefix = if let Some(ref hp) = hotkey_prefix {
                     hp.as_str()
-                } else if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else if is_companion { " \u{21b3} " } else { "  " };
+                } else if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else if is_companion { "   \u{21b3} " } else { "  " };
                 let avail = name_chars.saturating_sub(prefix.chars().count());
                 let display_name = if name_counts.get(&session.name).copied().unwrap_or(0) > 1 {
                     let seen = name_seen.entry(session.name.clone()).or_insert(0);
@@ -581,7 +581,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(false);
 
     let mut hints: Vec<(&str, &str)> = vec![
-        ("\u{23ce}","Attach"), ("c","New"), ("x","Kill"), ("p","Pin"), ("C","Const"),
+        ("\u{23ce}","Attach"), ("d","Dup"), ("Tab","Cycle"), ("c","New"), ("x","Kill"), ("p","Pin"), ("C","Const"),
     ];
     if on_constant {
         hints.push(("e", "Cmd"));

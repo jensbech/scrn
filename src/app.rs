@@ -50,7 +50,7 @@ pub enum ListItem {
         name: String,
         path: PathBuf,
         session: Option<Session>,
-        companion: Option<Session>,
+        companions: Vec<Session>,
         prefix: String,
     },
 }
@@ -492,7 +492,7 @@ impl App {
             let mut ws_remove: HashSet<usize> = HashSet::new();
             let mut orphan_remove: HashSet<usize> = HashSet::new();
 
-            let mut ws_by_name: HashMap<String, (usize, ListItem, Option<(usize, ListItem)>)> = HashMap::new();
+            let mut ws_by_name: HashMap<String, (usize, ListItem, Option<(usize, ListItem)>, Vec<ListItem>)> = HashMap::new();
             let mut last_dir_idx: Option<usize> = None;
             for (i, item) in ws_items.iter().enumerate() {
                 match item {
@@ -503,7 +503,22 @@ impl App {
                         if name_set.contains(name.as_str()) {
                             ws_remove.insert(i);
                             let dir = last_dir_idx.map(|di| (di, ws_items[di].clone()));
-                            ws_by_name.insert(name.clone(), (i, item.clone(), dir));
+                            let mut companion_rows: Vec<ListItem> = Vec::new();
+                            let mut j = i + 1;
+                            while j < ws_items.len() {
+                                if let ListItem::SessionItem(s) = &ws_items[j] {
+                                    if (2..=9).any(|n| s.name.ends_with(&format!("-{n}"))) {
+                                        ws_remove.insert(j);
+                                        companion_rows.push(ws_items[j].clone());
+                                        j += 1;
+                                    } else {
+                                        break;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                            ws_by_name.insert(name.clone(), (i, item.clone(), dir, companion_rows));
                         }
                     }
                     _ => {}
@@ -530,11 +545,11 @@ impl App {
             } else {
                 let mut sorted: Vec<String> = name_set.iter().cloned().collect();
                 sorted.sort_by(|a, b| {
-                    let da = ws_by_name.get(a).and_then(|(_, _, d)| d.as_ref().map(|(di, _)| *di)).unwrap_or(usize::MAX);
-                    let db = ws_by_name.get(b).and_then(|(_, _, d)| d.as_ref().map(|(di, _)| *di)).unwrap_or(usize::MAX);
+                    let da = ws_by_name.get(a).and_then(|(_, _, d, _)| d.as_ref().map(|(di, _)| *di)).unwrap_or(usize::MAX);
+                    let db = ws_by_name.get(b).and_then(|(_, _, d, _)| d.as_ref().map(|(di, _)| *di)).unwrap_or(usize::MAX);
                     da.cmp(&db).then(
-                        ws_by_name.get(a).map(|(wi, _, _)| *wi).unwrap_or(usize::MAX)
-                            .cmp(&ws_by_name.get(b).map(|(wi, _, _)| *wi).unwrap_or(usize::MAX))
+                        ws_by_name.get(a).map(|(wi, _, _, _)| *wi).unwrap_or(usize::MAX)
+                            .cmp(&ws_by_name.get(b).map(|(wi, _, _, _)| *wi).unwrap_or(usize::MAX))
                     )
                 });
                 default_order = sorted;
@@ -542,7 +557,7 @@ impl App {
             };
 
             for name in iteration_order {
-                if let Some((_wi, repo_item, dir)) = ws_by_name.remove(name) {
+                if let Some((_wi, repo_item, dir, companion_rows)) = ws_by_name.remove(name) {
                     if let Some((di, dir_item)) = dir {
                         if last_dir != Some(di) {
                             items.push(dir_item);
@@ -551,6 +566,10 @@ impl App {
                     }
                     selectable.push(items.len());
                     items.push(repo_item);
+                    for companion_item in companion_rows {
+                        selectable.push(items.len());
+                        items.push(companion_item);
+                    }
                 } else if let Some((_oi, session_item)) = orphan_by_name.remove(name) {
                     selectable.push(items.len());
                     items.push(session_item);
@@ -832,6 +851,29 @@ impl App {
         self.action = Action::Create(name, Some(PathBuf::from(home)));
     }
 
+    fn next_companion_name(base: &str, all_sessions: &[Session]) -> Option<String> {
+        for n in 2..=9 {
+            let candidate = format!("{base}-{n}");
+            if !all_sessions.iter().any(|s| s.name == candidate) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn companion_base_name(name: &str) -> &str {
+        for n in (2..=9).rev() {
+            let suffix_len = if n >= 10 { 3 } else { 2 };
+            if name.len() > suffix_len {
+                let (base, tail) = name.split_at(name.len() - suffix_len);
+                if tail == format!("-{n}") {
+                    return base;
+                }
+            }
+        }
+        name
+    }
+
     pub fn duplicate_session(&mut self) {
         let item = match self.selected_display_item() {
             Some(item) => item.clone(),
@@ -839,28 +881,14 @@ impl App {
         };
         match item {
             ListItem::TreeRepo { name, path, .. } => {
-                let dup_name = format!("{name}-2");
-                if let Some(existing) = self.all_sessions.iter()
-                    .find(|s| s.name == dup_name && !self.is_current_session(s))
-                    .cloned()
-                {
-                    self.record_opened(&dup_name);
-                    self.action = Action::Attach(existing.pid_name);
-                } else if !self.all_sessions.iter().any(|s| s.name == dup_name) {
+                if let Some(dup_name) = Self::next_companion_name(&name, &self.all_sessions) {
                     self.record_opened(&dup_name);
                     self.action = Action::Create(dup_name, Some(path));
                 }
             }
             ListItem::SessionItem(session) => {
-                let base = session.name.strip_suffix("-2").unwrap_or(&session.name).to_string();
-                let dup_name = format!("{base}-2");
-                if let Some(existing) = self.all_sessions.iter()
-                    .find(|s| s.name == dup_name && !self.is_current_session(s))
-                    .cloned()
-                {
-                    self.record_opened(&dup_name);
-                    self.action = Action::Attach(existing.pid_name);
-                } else if !self.all_sessions.iter().any(|s| s.name == dup_name) {
+                let base = Self::companion_base_name(&session.name).to_string();
+                if let Some(dup_name) = Self::next_companion_name(&base, &self.all_sessions) {
                     if let Some(cwd) = screen::get_session_cwd(&session.pid_name) {
                         self.record_opened(&dup_name);
                         self.action = Action::Create(dup_name, Some(cwd));
@@ -870,6 +898,68 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    pub fn cycle_companion(&mut self, forward: bool) {
+        let cur_name = match self.selected_item_name() {
+            Some(n) => n,
+            None => return,
+        };
+        let base = Self::companion_base_name(&cur_name).to_string();
+
+        let mut sibling_indices: Vec<usize> = Vec::new();
+        for (sel_idx, &disp_idx) in self.selectable_indices.iter().enumerate() {
+            let name = match self.display_items.get(disp_idx) {
+                Some(ListItem::TreeRepo { name, .. }) => name.as_str(),
+                Some(ListItem::SessionItem(s)) => s.name.as_str(),
+                _ => continue,
+            };
+            if name == base || Self::companion_base_name(name) == base {
+                sibling_indices.push(sel_idx);
+            }
+        }
+
+        if sibling_indices.is_empty() {
+            return;
+        }
+
+        let cur_pos = sibling_indices.iter().position(|&i| i == self.selected);
+
+        if forward {
+            if let Some(pos) = cur_pos {
+                if pos + 1 < sibling_indices.len() {
+                    self.selected = sibling_indices[pos + 1];
+                    self.select_for_attach();
+                } else {
+                    let dir = self.display_items.iter().find_map(|item| {
+                        if let ListItem::TreeRepo { name, path, .. } = item {
+                            if name == &base { Some(path.clone()) } else { None }
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(dup_name) = Self::next_companion_name(&base, &self.all_sessions) {
+                        self.record_opened(&dup_name);
+                        self.action = Action::Create(dup_name, dir);
+                    } else {
+                        self.selected = sibling_indices[0];
+                        self.select_for_attach();
+                    }
+                }
+            } else {
+                self.selected = sibling_indices[0];
+                self.select_for_attach();
+            }
+        } else {
+            if let Some(pos) = cur_pos {
+                if pos > 0 {
+                    self.selected = sibling_indices[pos - 1];
+                } else {
+                    self.selected = *sibling_indices.last().unwrap();
+                }
+                self.select_for_attach();
+            }
         }
     }
 
@@ -1203,25 +1293,30 @@ fn flatten_tree(
             if let Some(ref s) = session {
                 merged.insert(s.name.clone());
             }
-            let companion_name = format!("{}-2", child.name);
-            let companion = session_map.get(companion_name.as_str()).cloned().cloned();
-            if companion.is_some() {
-                merged.insert(companion_name);
+            let mut companions = Vec::new();
+            for n in 2..=9 {
+                let cname = format!("{}-{}", child.name, n);
+                if let Some(cs) = session_map.get(cname.as_str()).cloned().cloned() {
+                    merged.insert(cname);
+                    companions.push(cs);
+                } else {
+                    break;
+                }
             }
 
-            let companion_row = companion.clone();
+            let companion_rows = companions.clone();
             let idx = display_items.len();
             display_items.push(ListItem::TreeRepo {
                 name: child.name.clone(),
                 path: child.path.clone(),
                 session,
-                companion,
+                companions,
                 prefix: " ".to_string(),
             });
             selectable_indices.push(idx);
-            if let Some(companion_session) = companion_row {
+            for cs in companion_rows {
                 let cidx = display_items.len();
-                display_items.push(ListItem::SessionItem(companion_session));
+                display_items.push(ListItem::SessionItem(cs));
                 selectable_indices.push(cidx);
             }
         } else {
@@ -1286,25 +1381,30 @@ fn flatten_filtered(
             if let Some(ref s) = session {
                 merged.insert(s.name.clone());
             }
-            let companion_name = format!("{}-2", child.name);
-            let companion = session_map.get(companion_name.as_str()).cloned().cloned();
-            if companion.is_some() {
-                merged.insert(companion_name);
+            let mut companions = Vec::new();
+            for n in 2..=9 {
+                let cname = format!("{}-{}", child.name, n);
+                if let Some(cs) = session_map.get(cname.as_str()).cloned().cloned() {
+                    merged.insert(cname);
+                    companions.push(cs);
+                } else {
+                    break;
+                }
             }
 
-            let companion_row = companion.clone();
+            let companion_rows = companions.clone();
             let idx = display_items.len();
             display_items.push(ListItem::TreeRepo {
                 name: child.name.clone(),
                 path: child.path.clone(),
                 session,
-                companion,
+                companions,
                 prefix: " ".to_string(),
             });
             selectable_indices.push(idx);
-            if let Some(companion_session) = companion_row {
+            for cs in companion_rows {
                 let cidx = display_items.len();
-                display_items.push(ListItem::SessionItem(companion_session));
+                display_items.push(ListItem::SessionItem(cs));
                 selectable_indices.push(cidx);
             }
         } else {
@@ -1499,7 +1599,7 @@ fn save_sessions(all_sessions: &[Session], workspace_tree: &Option<TreeNode>) {
 
     let mut lines: Vec<String> = all_sessions
         .iter()
-        .filter(|s| !s.name.ends_with("-2"))
+        .filter(|s| !(2..=9).any(|n| s.name.ends_with(&format!("-{n}"))))
         .filter(|s| !s.name.starts_with("tty") && !s.name.starts_with("pts"))
         .filter(|s| !s.name.starts_with("tmp-"))
         .map(|s| {

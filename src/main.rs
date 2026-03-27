@@ -326,6 +326,13 @@ fn run_picker(
                         KeyCode::Tab => {
                             if !app.search_input.is_empty() {
                                 app.toggle_search_filter();
+                            } else {
+                                app.cycle_companion(true);
+                            }
+                        }
+                        KeyCode::BackTab => {
+                            if app.search_input.is_empty() {
+                                app.cycle_companion(false);
                             }
                         }
                         KeyCode::Char('r') => app.refresh_sessions(),
