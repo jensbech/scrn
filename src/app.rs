@@ -480,7 +480,7 @@ impl App {
             ws_items: &[ListItem],
             orphan_items: &[ListItem],
         ) -> (Vec<ListItem>, Vec<usize>, HashSet<usize>, HashSet<usize>) {
-            extract_ordered_section(None, name_set, ws_items, orphan_items)
+            extract_ordered_section(None, name_set, ws_items, orphan_items, true)
         }
 
         fn extract_ordered_section(
@@ -488,6 +488,7 @@ impl App {
             name_set: &HashSet<String>,
             ws_items: &[ListItem],
             orphan_items: &[ListItem],
+            show_dirs: bool,
         ) -> (Vec<ListItem>, Vec<usize>, HashSet<usize>, HashSet<usize>) {
             let mut ws_remove: HashSet<usize> = HashSet::new();
             let mut orphan_remove: HashSet<usize> = HashSet::new();
@@ -558,10 +559,12 @@ impl App {
 
             for name in iteration_order {
                 if let Some((_wi, repo_item, dir, companion_rows)) = ws_by_name.remove(name) {
-                    if let Some((di, dir_item)) = dir {
-                        if last_dir != Some(di) {
-                            items.push(dir_item);
-                            last_dir = Some(di);
+                    if show_dirs {
+                        if let Some((di, dir_item)) = dir {
+                            if last_dir != Some(di) {
+                                items.push(dir_item);
+                                last_dir = Some(di);
+                            }
                         }
                     }
                     selectable.push(items.len());
@@ -611,7 +614,7 @@ impl App {
 
         let const_set: HashSet<String> = self.constants.iter().cloned().collect();
         let (const_items, const_selectable, const_ws_remove, const_orphan_remove) =
-            extract_ordered_section(Some(&self.constants), &const_set, &ws_items, &orphan_items);
+            extract_ordered_section(Some(&self.constants), &const_set, &ws_items, &orphan_items, false);
 
         // Remove constant items from ws/orphan groups
         if !const_ws_remove.is_empty() {

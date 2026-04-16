@@ -359,7 +359,8 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     .filter(|&i| i < 9)
                     .map(|i| format!("{} ", i + 1))
                     .unwrap_or_else(|| "  ".to_string());
-                let avail = name_chars.saturating_sub(hotkey_prefix.len() + prefix.chars().count());
+                let display_prefix = if const_idx.is_some() { "" } else { prefix.as_str() };
+                let avail = name_chars.saturating_sub(hotkey_prefix.len() + display_prefix.chars().count());
                 let name_text = truncate(name, avail);
                 let has_session = session.is_some();
                 let name_fg = if has_session { GREEN } else { REPO_FG };
@@ -371,7 +372,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                             positions.into_iter().filter(|&p| p < max_pos).collect();
                         let mut spans = vec![
                             Span::styled(hotkey_prefix.clone(), Style::default().fg(DIM).bg(bg)),
-                            Span::styled(prefix.clone(), Style::default().fg(TREE_GUIDE).bg(bg)),
+                            Span::styled(display_prefix, Style::default().fg(TREE_GUIDE).bg(bg)),
                         ];
                         let normal_style = Style::default().fg(name_fg).bg(bg);
                         let match_style = Style::default()
@@ -399,7 +400,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     } else {
                         let mut spans = vec![
                             Span::styled(hotkey_prefix.clone(), Style::default().fg(DIM).bg(bg)),
-                            Span::styled(prefix.clone(), Style::default().fg(TREE_GUIDE).bg(bg)),
+                            Span::styled(display_prefix, Style::default().fg(TREE_GUIDE).bg(bg)),
                         ];
                         spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
                         Cell::from(Line::from(spans))
@@ -407,7 +408,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     let mut spans = vec![
                         Span::styled(hotkey_prefix.clone(), Style::default().fg(DIM).bg(bg)),
-                        Span::styled(prefix.clone(), Style::default().fg(TREE_GUIDE).bg(bg)),
+                        Span::styled(display_prefix, Style::default().fg(TREE_GUIDE).bg(bg)),
                     ];
                     spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
                     Cell::from(Line::from(spans))
