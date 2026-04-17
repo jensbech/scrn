@@ -1,106 +1,104 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 200" width="300" height="200">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 210" width="320" height="210">
   <defs>
     <filter id="shadow" x="-8%" y="-8%" width="120%" height="120%">
       <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.5"/>
     </filter>
-    <filter id="inset" x="-5%" y="-5%" width="112%" height="112%">
-      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="#000" flood-opacity="0.3"/>
-    </filter>
+    <style>
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    </style>
   </defs>
 
-  <!-- === Outer Window === -->
+  <!-- Outer window -->
   <g filter="url(#shadow)">
-    <rect x="2" y="2" width="296" height="196" rx="10" fill="#181926" stroke="#66BB6A" stroke-width="1.5" stroke-opacity="0.35"/>
-    <!-- Title bar -->
-    <rect x="2" y="2" width="296" height="26" rx="10" fill="#1e2030"/>
-    <rect x="2" y="18" width="296" height="10" fill="#1e2030"/>
-    <line x1="2" y1="28" x2="298" y2="28" stroke="#66BB6A" stroke-width="0.5" stroke-opacity="0.2"/>
-    <!-- Traffic lights -->
-    <circle cx="18" cy="15" r="4.5" fill="#ff5f57"/>
-    <circle cx="32" cy="15" r="4.5" fill="#febc2e"/>
-    <circle cx="46" cy="15" r="4.5" fill="#28c840"/>
-    <!-- Title -->
-    <text x="150" y="19" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,monospace" font-size="10" fill="#8087a2" font-weight="500">scrn</text>
+    <rect x="2" y="2" width="316" height="206" rx="10" fill="#121218" stroke="#3c3c50" stroke-width="1" stroke-opacity="0.55"/>
+    <rect x="2" y="2" width="316" height="24" rx="10" fill="#1e1e28"/>
+    <rect x="2" y="16" width="316" height="10" fill="#1e1e28"/>
+    <line x1="2" y1="26" x2="318" y2="26" stroke="#3c3c50" stroke-width="0.4" stroke-opacity="0.7"/>
+    <circle cx="14" cy="14" r="3.5" fill="#ff5f57"/>
+    <circle cx="24" cy="14" r="3.5" fill="#febc2e"/>
+    <circle cx="34" cy="14" r="3.5" fill="#28c840"/>
+    <text class="mono" x="50" y="17" font-size="9" fill="#b4b4ff" font-weight="700">scrn</text>
+    <text class="mono" x="70" y="17" font-size="7.5" fill="#505064">v4.4.0</text>
   </g>
 
-  <!-- Vertical divider -->
-  <line x1="100" y1="28" x2="100" y2="198" stroke="#66BB6A" stroke-width="0.5" stroke-opacity="0.2"/>
+  <!-- Column headers -->
+  <text class="mono" x="10" y="35" font-size="6.5" fill="#b4b4c8" font-weight="600">Name</text>
+  <text class="mono" x="200" y="35" font-size="6.5" fill="#b4b4c8" font-weight="600">Status</text>
 
-  <!-- === Left Sidebar: Tree View === -->
+  <!-- Constants band (reddish) -->
+  <rect x="4" y="40" width="312" height="28" fill="#231018"/>
+  <rect x="4" y="49" width="312" height="9" fill="#301621" opacity="0.85"/>
 
-  <!-- Section header -->
-  <text x="10" y="43" font-family="ui-monospace,SFMono-Regular,monospace" font-size="5.5" fill="#8087a2" opacity="0.55" letter-spacing="1">WORKSPACE</text>
+  <text class="mono" x="10" y="47" font-size="7" fill="#64646e">1</text>
+  <text class="mono" x="22" y="47" font-size="7" fill="#50c878" font-weight="600">notes</text>
+  <text class="mono" x="200" y="47" font-size="7" fill="#a0be8c">timer-daemon</text>
 
-  <!-- Expanded folder: projects -->
-  <polygon points="10,52 15,55.5 10,59" fill="#8087a2" opacity="0.55"/>
-  <rect x="19" y="53" width="44" height="3" rx="1.5" fill="#8087a2" opacity="0.5"/>
+  <text class="mono" x="10" y="56" font-size="7" fill="#64646e">2</text>
+  <text class="mono" x="22" y="56" font-size="7" fill="#50c878" font-weight="600">docker</text>
+  <text class="mono" x="200" y="56" font-size="7" fill="#a0be8c">context ls</text>
 
-  <!-- Tree connector lines -->
-  <line x1="15" y1="61" x2="15" y2="127" stroke="#5b6078" stroke-width="0.5" stroke-opacity="0.2"/>
-  <line x1="15" y1="71" x2="21" y2="71" stroke="#5b6078" stroke-width="0.5" stroke-opacity="0.2"/>
-  <line x1="15" y1="87" x2="21" y2="87" stroke="#5b6078" stroke-width="0.5" stroke-opacity="0.2"/>
-  <line x1="15" y1="103" x2="21" y2="103" stroke="#5b6078" stroke-width="0.5" stroke-opacity="0.2"/>
-  <line x1="15" y1="119" x2="21" y2="119" stroke="#5b6078" stroke-width="0.5" stroke-opacity="0.2"/>
+  <text class="mono" x="10" y="65" font-size="7" fill="#64646e">3</text>
+  <text class="mono" x="22" y="65" font-size="7" fill="#50c878" font-weight="600">logs</text>
+  <text class="mono" x="200" y="65" font-size="7" fill="#64646e">—</text>
 
-  <!-- Selected item highlight -->
-  <rect x="3" y="64" width="96" height="14" rx="2" fill="#66BB6A" opacity="0.12"/>
+  <line x1="6" y1="71" x2="314" y2="71" stroke="#3c3c50" stroke-width="0.4" stroke-opacity="0.7"/>
 
-  <!-- Item: scrn (selected - green) -->
-  <rect x="23" y="69" width="4" height="4" rx="1" fill="#66BB6A" opacity="0.85"/>
-  <rect x="30" y="69" width="28" height="3.5" rx="1.5" fill="#66BB6A" opacity="0.65"/>
+  <!-- Pinned section label -->
+  <text class="mono" x="10" y="81" font-size="6.5" fill="#8c78b4" letter-spacing="0.5" opacity="0.85">— Pinned</text>
 
-  <!-- Item: api -->
-  <rect x="23" y="85" width="4" height="4" rx="1" fill="#5b6078" opacity="0.4"/>
-  <rect x="30" y="85" width="20" height="3.5" rx="1.5" fill="#5b6078" opacity="0.35"/>
+  <!-- Folder row (expanded) on pinned-tinted bg -->
+  <rect x="4" y="85" width="312" height="9" fill="#16141e"/>
+  <text class="mono" x="10" y="91.5" font-size="7" fill="#8c78b4" font-weight="700">▾ proj/core/</text>
 
-  <!-- Item: web -->
-  <rect x="23" y="101" width="4" height="4" rx="1" fill="#5b6078" opacity="0.4"/>
-  <rect x="30" y="101" width="26" height="3.5" rx="1.5" fill="#5b6078" opacity="0.35"/>
+  <!-- cart-api (inactive) -->
+  <text class="mono" x="22" y="100.5" font-size="7" fill="#b4b4c8">cart-api</text>
+  <text class="mono" x="200" y="100.5" font-size="7" fill="#64646e">—</text>
 
-  <!-- Item: lib -->
-  <rect x="23" y="117" width="4" height="4" rx="1" fill="#5b6078" opacity="0.4"/>
-  <rect x="30" y="117" width="16" height="3.5" rx="1.5" fill="#5b6078" opacity="0.35"/>
+  <!-- checkout (inactive, zebra) -->
+  <rect x="4" y="104" width="312" height="9" fill="#1e1e28"/>
+  <text class="mono" x="22" y="110.5" font-size="7" fill="#b4b4c8">checkout</text>
+  <text class="mono" x="200" y="110.5" font-size="7" fill="#64646e">—</text>
 
-  <!-- Collapsed folder: tools -->
-  <polygon points="8,139 13,142.5 8,146" fill="#8087a2" opacity="0.4"/>
-  <rect x="17" y="140" width="34" height="3" rx="1.5" fill="#8087a2" opacity="0.35"/>
+  <!-- inventory (active, 1 pill idle) -->
+  <text class="mono" x="22" y="119.5" font-size="7" fill="#50c878" font-weight="600">inventory</text>
+  <rect x="88" y="113.5" width="11" height="8.5" rx="1.5" fill="#2d2d41"/>
+  <text class="mono" x="93.5" y="120" font-size="6" fill="#dcdce6" text-anchor="middle" font-weight="600">1</text>
+  <text class="mono" x="200" y="119.5" font-size="7" fill="#a0be8c">cargo test</text>
 
-  <!-- Collapsed folder: config -->
-  <polygon points="8,155 13,158.5 8,162" fill="#8087a2" opacity="0.35"/>
-  <rect x="17" y="156" width="40" height="3" rx="1.5" fill="#8087a2" opacity="0.3"/>
+  <!-- SELECTED: notifications (pills 1 active + 2 proc running) -->
+  <rect x="4" y="123" width="312" height="10" fill="#373750"/>
+  <rect x="4" y="123" width="3" height="10" fill="#b4b4ff"/>
+  <text class="mono" x="22" y="130" font-size="7" fill="#50c878" font-weight="700">notifications</text>
+  <rect x="110" y="124" width="11" height="8.5" rx="1.5" fill="#5082c8"/>
+  <text class="mono" x="115.5" y="130.5" font-size="6" fill="#ffffff" text-anchor="middle" font-weight="700">1</text>
+  <rect x="124" y="124" width="11" height="8.5" rx="1.5" fill="#375a37"/>
+  <text class="mono" x="129.5" y="130.5" font-size="6" fill="#dcdce6" text-anchor="middle" font-weight="600">2</text>
+  <text class="mono" x="200" y="130" font-size="7" fill="#a0be8c" font-weight="700">node opencode</text>
 
-  <!-- === Right Panel: Inner Terminal Window === -->
-  <g filter="url(#inset)">
-    <rect x="105" y="33" width="188" height="161" rx="7" fill="#1e2030" stroke="#66BB6A" stroke-width="1" stroke-opacity="0.45"/>
-    <!-- Title bar -->
-    <rect x="105" y="33" width="188" height="22" rx="7" fill="#24273a"/>
-    <rect x="105" y="49" width="188" height="6" fill="#24273a"/>
-    <line x1="105" y1="55" x2="293" y2="55" stroke="#66BB6A" stroke-width="0.4" stroke-opacity="0.2"/>
-    <!-- Mini traffic lights -->
-    <circle cx="117" cy="44" r="3" fill="#ff5f57"/>
-    <circle cx="127" cy="44" r="3" fill="#febc2e"/>
-    <circle cx="137" cy="44" r="3" fill="#28c840"/>
-    <!-- Title -->
-    <text x="216" y="48" text-anchor="middle" font-family="ui-monospace,SFMono-Regular,monospace" font-size="8" fill="#8087a2">session</text>
+  <!-- orders (active) -->
+  <text class="mono" x="22" y="139" font-size="7" fill="#50c878" font-weight="600">orders</text>
+  <text class="mono" x="200" y="139" font-size="7" fill="#a0be8c">jest --watch</text>
 
-    <!-- Terminal content -->
-    <!-- Command 1 + output -->
-    <text x="113" y="72" font-family="ui-monospace,SFMono-Regular,monospace" font-size="7.5" fill="#66BB6A" opacity="0.85">$</text>
-    <rect x="122" y="67" width="54" height="2.5" rx="1" fill="#cad3f5" opacity="0.22"/>
-    <rect x="113" y="79" width="82" height="2" rx="1" fill="#5b6078" opacity="0.25"/>
-    <rect x="113" y="87" width="68" height="2" rx="1" fill="#5b6078" opacity="0.2"/>
-    <rect x="113" y="95" width="74" height="2" rx="1" fill="#5b6078" opacity="0.16"/>
+  <!-- payments (inactive, zebra) -->
+  <rect x="4" y="142" width="312" height="9" fill="#1e1e28"/>
+  <text class="mono" x="22" y="148.5" font-size="7" fill="#b4b4c8">payments</text>
+  <text class="mono" x="200" y="148.5" font-size="7" fill="#64646e">—</text>
 
-    <!-- Command 2 + output -->
-    <text x="113" y="113" font-family="ui-monospace,SFMono-Regular,monospace" font-size="7.5" fill="#66BB6A" opacity="0.85">$</text>
-    <rect x="122" y="108" width="40" height="2.5" rx="1" fill="#cad3f5" opacity="0.22"/>
-    <rect x="113" y="120" width="92" height="2" rx="1" fill="#5b6078" opacity="0.2"/>
-    <rect x="113" y="128" width="55" height="2" rx="1" fill="#5b6078" opacity="0.16"/>
+  <!-- users (active, pill 1) -->
+  <text class="mono" x="22" y="157.5" font-size="7" fill="#50c878" font-weight="600">users</text>
+  <rect x="65" y="151.5" width="11" height="8.5" rx="1.5" fill="#2d2d41"/>
+  <text class="mono" x="70.5" y="158" font-size="6" fill="#dcdce6" text-anchor="middle" font-weight="600">1</text>
+  <text class="mono" x="200" y="157.5" font-size="7" fill="#a0be8c">pnpm dev</text>
 
-    <!-- Active prompt with blinking cursor -->
-    <text x="113" y="148" font-family="ui-monospace,SFMono-Regular,monospace" font-size="7.5" fill="#66BB6A" opacity="0.9">$</text>
-    <rect x="121" y="141" width="5" height="9" rx="1" fill="#66BB6A" opacity="0.85">
-      <animate attributeName="opacity" values="0.85;0.15;0.85" dur="1.2s" repeatCount="indefinite"/>
-    </rect>
-  </g>
+  <line x1="6" y1="164" x2="314" y2="164" stroke="#3c3c50" stroke-width="0.4" stroke-opacity="0.7"/>
+
+  <!-- Recents label -->
+  <text class="mono" x="10" y="174" font-size="6.5" fill="#8c78b4" letter-spacing="0.5" opacity="0.85">— Recents</text>
+
+  <!-- Recent row: notifications-2 -->
+  <text class="mono" x="22" y="186" font-size="7" fill="#50c878" font-weight="600">↳ notifications-2</text>
+  <text class="mono" x="200" y="186" font-size="7" fill="#a0be8c">claude</text>
+
+  <!-- Bottom hint strip -->
+  <text class="mono" x="10" y="201" font-size="5.5" fill="#64646e" opacity="0.85">↵ Attach  d Dup+label  ←/→ Pill  /  Search  c New  ` Back</text>
 </svg>
