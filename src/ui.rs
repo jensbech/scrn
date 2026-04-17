@@ -10,6 +10,111 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use crate::app::{fuzzy_match, App, ListItem, Mode};
+use crate::screen::Session;
+
+const PILL_ACTIVE_BG: Color = Color::Rgb(80, 130, 200);
+const PILL_IDLE_BG: Color = Color::Rgb(45, 45, 65);
+const PILL_PROC_BG: Color = Color::Rgb(55, 90, 55);
+const PILL_ACTIVE_SEL_BG: Color = Color::Rgb(120, 170, 240);
+const PILL_IDLE_SEL_BG: Color = Color::Rgb(80, 80, 110);
+const PILL_PROC_SEL_BG: Color = Color::Rgb(90, 140, 90);
+
+fn pill_label(session_name: &str, labels: &HashMap<String, String>) -> String {
+    if let Some(l) = labels.get(session_name) {
+        return l.clone();
+    }
+    for n in 2..=9 {
+        if session_name.ends_with(&format!("-{n}")) {
+            return n.to_string();
+        }
+    }
+    "1".to_string()
+}
+
+fn pills_display_width(pills: &[Session], labels: &HashMap<String, String>) -> usize {
+    if pills.is_empty() {
+        return 0;
+    }
+    let mut w = 1;
+    for p in pills {
+        let lbl = pill_label(&p.name, labels);
+        w += 2 + lbl.chars().count() + 1;
+    }
+    w
+}
+
+/// Status column: one colored proc blob per pill, separated by " · ".
+fn build_pill_status_spans(
+    pills: &[Session],
+    active_idx: usize,
+    app: &App,
+    row_bg: Color,
+    _is_selected: bool,
+) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    if pills.is_empty() {
+        return out;
+    }
+    for (i, p) in pills.iter().enumerate() {
+        if i > 0 {
+            out.push(Span::styled(" \u{00b7} ".to_string(), Style::default().fg(DIM).bg(row_bg)));
+        }
+        let proc = app.session_proc(&p.pid_name).to_string();
+        let is_active = i == active_idx;
+        let (text, fg, modifier) = if proc.is_empty() {
+            ("\u{2500}".to_string(), DIM, Modifier::empty())
+        } else {
+            let m = if is_active { Modifier::BOLD } else { Modifier::empty() };
+            (proc, PROC_FG, m)
+        };
+        out.push(Span::styled(
+            text,
+            Style::default().fg(fg).bg(row_bg).add_modifier(modifier),
+        ));
+    }
+    out
+}
+
+fn build_pill_spans(
+    pills: &[Session],
+    active_idx: usize,
+    labels: &HashMap<String, String>,
+    proc_flags: &[bool],
+    row_bg: Color,
+    is_selected: bool,
+) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    if pills.is_empty() {
+        return out;
+    }
+    out.push(Span::styled(" ".to_string(), Style::default().bg(row_bg)));
+    for (i, p) in pills.iter().enumerate() {
+        let lbl = pill_label(&p.name, labels);
+        let has_proc = *proc_flags.get(i).unwrap_or(&false);
+        let is_active = i == active_idx;
+        let bg = match (is_selected, is_active, has_proc) {
+            (true, true, _) => PILL_ACTIVE_SEL_BG,
+            (true, false, true) => PILL_PROC_SEL_BG,
+            (true, false, false) => PILL_IDLE_SEL_BG,
+            (false, true, _) => PILL_ACTIVE_BG,
+            (false, false, true) => PILL_PROC_BG,
+            (false, false, false) => PILL_IDLE_BG,
+        };
+        let fg = if is_active { FG_BRIGHT } else { FG };
+        let mut modifier = Modifier::empty();
+        if is_active {
+            modifier |= Modifier::BOLD;
+        }
+        out.push(Span::styled(
+            format!(" {lbl} "),
+            Style::default().fg(fg).bg(bg).add_modifier(modifier),
+        ));
+        if i < pills.len() - 1 {
+            out.push(Span::styled(" ".to_string(), Style::default().bg(row_bg)));
+        }
+    }
+    out
+}
 
 // ── Palette — ALL explicit Rgb, zero ANSI named colors ─────
 const BASE_BG: Color = Color::Rgb(18, 18, 24);
@@ -43,7 +148,6 @@ const CONST_ZEBRA_BG: Color = Color::Rgb(48, 22, 33);
 const PIN_BG: Color = Color::Rgb(22, 20, 30);
 const PIN_ZEBRA_BG: Color = Color::Rgb(33, 30, 46);
 const REPO_FG: Color = Color::Rgb(180, 180, 200);
-const NOTE_FG: Color = Color::Rgb(200, 175, 110);
 const TREE_GUIDE: Color = Color::Rgb(55, 55, 75);
 
 fn split_at_char_pos(s: &str, pos: usize) -> (&str, &str) {
@@ -91,6 +195,27 @@ fn visible_input(input: &str, cursor_pos: usize, max_chars: usize) -> String {
         result.push('\u{2026}');
     }
     result
+}
+
+/// Number of display columns a SessionItem prefix will consume (hotkey / current
+/// marker / throwaway marker / companion arrow). Must stay in sync with the
+/// renderer below.
+fn session_prefix_width(session: &crate::screen::Session, app: &App) -> usize {
+    let const_idx = app.constants.iter().position(|n| n == &session.name);
+    if const_idx.filter(|&i| i < 9).is_some() {
+        return 2;
+    }
+    if app.is_current_session(session) {
+        return 2; // ◆ + space
+    }
+    if session.name.starts_with("tmp-") {
+        return 2; // ~ + space
+    }
+    let is_companion = (2..=9).any(|n| session.name.ends_with(&format!("-{n}")));
+    if is_companion {
+        return 5;
+    }
+    2
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -180,13 +305,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             dim_background(f);
             draw_constant_ordering_modal(f, app);
         }
-        Mode::EditingNote => {
-            dim_background(f);
-            draw_note_modal(f, app);
-        }
         Mode::EditingCommand => {
             dim_background(f);
             draw_command_modal(f, app);
+        }
+        Mode::EditingLabel => {
+            dim_background(f);
+            draw_label_modal(f, app, false);
+        }
+        Mode::LabelNewCompanion => {
+            dim_background(f);
+            draw_label_modal(f, app, true);
         }
         _ => {}
     }
@@ -209,25 +338,32 @@ fn dim_background(f: &mut Frame) {
 // ── Main table ──────────────────────────────────────────────
 
 fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
-    const NOTE_W: u16 = 28;
     const COL_SPACING: u16 = 2;
     const BORDERS: u16 = 2;
     const HIGHLIGHT_SYM: u16 = 2;
     const MIN_NAME_W: u16 = 10;
+    const PILL_GUTTER: u16 = 2;
 
-    // Measure widest actual process text and session name to size columns to content.
-    let max_proc_chars = app.display_items.iter().filter_map(|item| match item {
-        ListItem::SessionItem(s) => Some(app.session_proc(&s.pid_name).chars().count()),
-        ListItem::TreeRepo { session: Some(s), .. } => Some(app.session_proc(&s.pid_name).chars().count()),
-        _ => None,
-    }).max().unwrap_or(0) as u16;
-
+    // Alignment plan: every "selectable" row pads its name+prefix to the same
+    // visual width so pills (or procs) line up on a fixed column.
     let max_name_chars = {
         let mut max = MIN_NAME_W as usize;
         for item in &app.display_items {
             let n = match item {
-                ListItem::SessionItem(s) => s.name.chars().count() + 5, // widest prefix "   ↳ "
-                ListItem::TreeRepo { name, prefix, .. } => name.chars().count() + 2 + prefix.chars().count(),
+                ListItem::SessionItem(s) => session_prefix_width(s, app) + s.name.chars().count(),
+                ListItem::TreeRepo { name, prefix, .. } => {
+                    // "  " hotkey slot + prefix + name
+                    2 + prefix.chars().count() + name.chars().count()
+                }
+                ListItem::TreeDir { name, descendant_repos, descendant_open, folded, .. } => {
+                    let base = 2 + name.chars().count() + 1;
+                    if *folded {
+                        base + 2 + format!("{descendant_repos}").chars().count()
+                            + if *descendant_open > 0 { format!(" ({descendant_open} open)").chars().count() } else { 0 }
+                    } else {
+                        base
+                    }
+                }
                 _ => continue,
             };
             if n > max { max = n; }
@@ -235,22 +371,57 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         max as u16
     };
 
-    let fixed_base = NOTE_W + (COL_SPACING * 2) + BORDERS + HIGHLIGHT_SYM;
-    let available = area.width.saturating_sub(fixed_base);
-
-    let (name_w, proc_w) = if max_name_chars + max_proc_chars <= available {
-        (max_name_chars, max_proc_chars)
-    } else {
-        let name_priority = (available / 2).max(MIN_NAME_W);
-        let pw = max_proc_chars.min(available.saturating_sub(name_priority));
-        let nw = available.saturating_sub(pw).max(MIN_NAME_W);
-        (nw, pw)
+    // Status column: max width of `proc1 · proc2 · ...` across rows.
+    let max_status_chars = {
+        let mut max = 0usize;
+        for item in &app.display_items {
+            let n = match item {
+                ListItem::SessionItem(s) => app.session_proc(&s.pid_name).chars().count(),
+                ListItem::TreeRepo { pills, .. } => {
+                    let mut total = 0usize;
+                    for (i, p) in pills.iter().enumerate() {
+                        let pr = app.session_proc(&p.pid_name);
+                        total += if pr.is_empty() { 1 } else { pr.chars().count() };
+                        if i + 1 < pills.len() { total += 3; }
+                    }
+                    total
+                }
+                _ => continue,
+            };
+            if n > max { max = n; }
+        }
+        max as u16
     };
 
-    let used = BORDERS + HIGHLIGHT_SYM + name_w + proc_w + COL_SPACING * 2;
-    let note_w = if area.width > used { area.width - used } else { NOTE_W }.max(NOTE_W);
+    let pills_w = {
+        let mut max = 0usize;
+        for item in &app.display_items {
+            if let ListItem::TreeRepo { pills, .. } = item {
+                let w = pills_display_width(pills, &app.companion_labels);
+                if w > max { max = w; }
+            }
+        }
+        max as u16
+    };
+
+    let fixed_base = (COL_SPACING * 2) + BORDERS + HIGHLIGHT_SYM;
+    let available = area.width.saturating_sub(fixed_base);
+
+    let want_name = max_name_chars + PILL_GUTTER + pills_w;
+    let (name_w, status_w) = if want_name + max_status_chars <= available {
+        (want_name, max_status_chars)
+    } else {
+        let name_priority = (available * 2 / 3).max(MIN_NAME_W);
+        let sw = max_status_chars.min(available.saturating_sub(name_priority));
+        let nw = available.saturating_sub(sw).max(MIN_NAME_W);
+        (nw, sw)
+    };
 
     let name_chars = name_w as usize;
+    // The column at which pills start: padded to the widest repo/session name.
+    let name_align_width = (max_name_chars as usize).min(
+        name_chars.saturating_sub(PILL_GUTTER as usize + pills_w as usize)
+    );
 
     let header_style = Style::default()
         .fg(HEADER_FG)
@@ -259,8 +430,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let header_cells = vec![
         Cell::from("Name"),
-        Cell::from("Process"),
-        Cell::from("Note"),
+        Cell::from("Status"),
     ];
     let header = Row::new(header_cells)
     .style(header_style)
@@ -284,7 +454,9 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .display_items
         .iter()
         .enumerate()
-        .map(|(_i, item)| match item {
+        .map(|(i, item)| {
+            let is_selected = Some(i) == selected_visual_row;
+            match item {
             ListItem::SectionHeader(title) => {
                 let full_width_name = format!(" \u{2500} {title}");
                 let cells = vec![
@@ -296,13 +468,12 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                             .add_modifier(Modifier::BOLD | Modifier::DIM),
                     ))),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                 ];
                 Row::new(cells).style(Style::default().fg(SECTION_FG).bg(BASE_BG))
             }
             ListItem::Separator => {
-                let line_char = "\u{2500}"; // ─
-                let total_w = (name_w + proc_w + note_w + COL_SPACING * 2) as usize;
+                let line_char = "\u{2500}";
+                let total_w = (name_w + status_w + COL_SPACING) as usize;
                 let line_str: String = line_char.repeat(total_w);
                 let cells = vec![
                     Cell::from(Span::styled(
@@ -310,49 +481,66 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                         Style::default().fg(BORDER_FG).bg(BASE_BG),
                     )),
                     Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                 ];
                 Row::new(cells)
                     .style(Style::default().fg(BORDER_FG).bg(BASE_BG))
                     .bottom_margin(1)
             }
-            ListItem::TreeDir { name, prefix, .. } => {
+            ListItem::TreeDir { name, prefix, folded, descendant_repos, descendant_open, .. } => {
+                let base_bg = if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
+                let bg = if is_selected { HIGHLIGHT_BG } else { base_bg };
+                selectable_row_idx += 1;
+
+                let icon = if *folded { "\u{25B8} " } else { "\u{25BE} " };
+                let icon_fg = if *folded { ACCENT } else { SECTION_FG };
                 let mut spans = vec![
-                    Span::styled("  ", Style::default().fg(SECTION_FG).bg(BASE_BG)),
+                    Span::styled(icon, Style::default().fg(icon_fg).bg(bg)),
                 ];
                 if !prefix.is_empty() {
                     spans.push(Span::styled(
                         prefix.clone(),
-                        Style::default().fg(TREE_GUIDE).bg(BASE_BG),
+                        Style::default().fg(TREE_GUIDE).bg(bg),
                     ));
                 }
                 spans.push(Span::styled(
                     format!("{name}/"),
                     Style::default()
                         .fg(SECTION_FG)
-                        .bg(BASE_BG)
-                        .add_modifier(Modifier::DIM),
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
                 ));
+                if *folded && *descendant_repos > 0 {
+                    spans.push(Span::styled(
+                        format!("  {descendant_repos}"),
+                        Style::default().fg(DIM).bg(bg),
+                    ));
+                    if *descendant_open > 0 {
+                        spans.push(Span::styled(
+                            format!(" ({descendant_open} open)"),
+                            Style::default().fg(GREEN).bg(bg).add_modifier(Modifier::DIM),
+                        ));
+                    }
+                }
                 let cells = vec![
                     Cell::from(Line::from(spans)),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
+                    Cell::from(Span::styled("", Style::default().bg(bg))),
                 ];
-                Row::new(cells).style(Style::default().fg(SECTION_FG).bg(BASE_BG))
+                Row::new(cells).style(Style::default().fg(SECTION_FG).bg(bg))
             }
             ListItem::TreeRepo {
                 name,
-                session,
-                companions,
+                pills,
+                active_idx,
                 prefix,
                 ..
             } => {
                 let const_idx = app.constants.iter().position(|n| n == name);
-                let bg = if const_idx.is_some() {
+                let base_bg = if const_idx.is_some() {
                     if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
                 } else if app.pins.contains(name) {
                     if selectable_row_idx % 2 == 1 { PIN_ZEBRA_BG } else { PIN_BG }
                 } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
+                let bg = if is_selected { HIGHLIGHT_BG } else { base_bg };
                 selectable_row_idx += 1;
 
                 let hotkey_prefix = const_idx
@@ -360,20 +548,23 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     .map(|i| format!("{} ", i + 1))
                     .unwrap_or_else(|| "  ".to_string());
                 let display_prefix = if const_idx.is_some() { "" } else { prefix.as_str() };
-                let avail = name_chars.saturating_sub(hotkey_prefix.len() + display_prefix.chars().count());
-                let name_text = truncate(name, avail);
-                let has_session = session.is_some();
+                let used_prefix = hotkey_prefix.chars().count() + display_prefix.chars().count();
+                let has_session = !pills.is_empty();
                 let name_fg = if has_session { GREEN } else { REPO_FG };
 
-                let name_cell = if !app.search_input.is_empty() {
+                let max_name_avail = name_align_width.saturating_sub(used_prefix);
+                let name_text = truncate(name, max_name_avail);
+                let pad_after_name = max_name_avail.saturating_sub(name_text.chars().count());
+
+                let mut spans: Vec<Span> = Vec::new();
+                spans.push(Span::styled(hotkey_prefix.clone(), Style::default().fg(DIM).bg(bg)));
+                spans.push(Span::styled(display_prefix, Style::default().fg(TREE_GUIDE).bg(bg)));
+
+                if !app.search_input.is_empty() {
                     if let Some((positions, _)) = fuzzy_match(name, &app.search_input) {
                         let max_pos = name_text.chars().count();
                         let highlight_set: std::collections::HashSet<usize> =
                             positions.into_iter().filter(|&p| p < max_pos).collect();
-                        let mut spans = vec![
-                            Span::styled(hotkey_prefix.clone(), Style::default().fg(DIM).bg(bg)),
-                            Span::styled(display_prefix, Style::default().fg(TREE_GUIDE).bg(bg)),
-                        ];
                         let normal_style = Style::default().fg(name_fg).bg(bg);
                         let match_style = Style::default()
                             .fg(MATCH_FG)
@@ -384,57 +575,41 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                         for (ci, ch) in name_text.chars().enumerate() {
                             let is_match = highlight_set.contains(&ci);
                             if is_match != current_is_match && !current.is_empty() {
-                                let style =
-                                    if current_is_match { match_style } else { normal_style };
+                                let style = if current_is_match { match_style } else { normal_style };
                                 spans.push(Span::styled(std::mem::take(&mut current), style));
                             }
                             current.push(ch);
                             current_is_match = is_match;
                         }
                         if !current.is_empty() {
-                            let style =
-                                if current_is_match { match_style } else { normal_style };
+                            let style = if current_is_match { match_style } else { normal_style };
                             spans.push(Span::styled(current, style));
                         }
-                        Cell::from(Line::from(spans))
                     } else {
-                        let mut spans = vec![
-                            Span::styled(hotkey_prefix.clone(), Style::default().fg(DIM).bg(bg)),
-                            Span::styled(display_prefix, Style::default().fg(TREE_GUIDE).bg(bg)),
-                        ];
                         spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
-                        Cell::from(Line::from(spans))
                     }
                 } else {
-                    let mut spans = vec![
-                        Span::styled(hotkey_prefix.clone(), Style::default().fg(DIM).bg(bg)),
-                        Span::styled(display_prefix, Style::default().fg(TREE_GUIDE).bg(bg)),
-                    ];
                     spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
-                    Cell::from(Line::from(spans))
-                };
+                }
 
-                let _ = companions;
+                if pad_after_name > 0 {
+                    spans.push(Span::styled(" ".repeat(pad_after_name), Style::default().bg(bg)));
+                }
+                // Fixed gutter so pills start at the same column across rows.
+                spans.push(Span::styled(" ".repeat(PILL_GUTTER as usize), Style::default().bg(bg)));
 
-                let proc_text = truncate(
-                    &session.as_ref().map(|s| app.session_proc(&s.pid_name).to_string()).unwrap_or_default(),
-                    proc_w as usize,
-                );
+                let proc_flags: Vec<bool> = pills
+                    .iter()
+                    .map(|p| !app.session_proc(&p.pid_name).is_empty())
+                    .collect();
+                let pill_spans = build_pill_spans(pills, *active_idx, &app.companion_labels, &proc_flags, bg, is_selected);
+                spans.extend(pill_spans);
 
-                let proc_cell = if proc_text.is_empty() {
-                    Cell::from(Span::styled("\u{2500}", Style::default().fg(DIM).bg(bg)))
-                } else {
-                    Cell::from(Span::styled(proc_text, Style::default().fg(PROC_FG).bg(bg)))
-                };
-
-                let note_text = app.notes.get(name)
-                    .map(|n| truncate(n, note_w as usize))
-                    .unwrap_or_default();
+                let status_spans = build_pill_status_spans(pills, *active_idx, app, bg, is_selected);
 
                 let cells = vec![
-                    name_cell,
-                    proc_cell,
-                    Cell::from(Span::styled(note_text, Style::default().fg(NOTE_FG).bg(bg))),
+                    Cell::from(Line::from(spans)),
+                    Cell::from(Line::from(status_spans)),
                 ];
                 Row::new(cells).style(Style::default().fg(FG).bg(bg))
             }
@@ -443,11 +618,12 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 let is_throwaway = session.name.starts_with("tmp-");
 
                 let const_idx = app.constants.iter().position(|n| n == &session.name);
-                let bg = if const_idx.is_some() {
+                let base_bg = if const_idx.is_some() {
                     if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
                 } else if app.pins.contains(&session.name) {
                     if selectable_row_idx % 2 == 1 { PIN_ZEBRA_BG } else { PIN_BG }
                 } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
+                let bg = if is_selected { HIGHLIGHT_BG } else { base_bg };
                 selectable_row_idx += 1;
                 let is_inactive_const = const_idx.is_some() && session.pid_name.is_empty();
                 let is_companion = !is_current && !is_throwaway && (2..=9).any(|n| session.name.ends_with(&format!("-{n}")));
@@ -458,7 +634,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 let prefix = if let Some(ref hp) = hotkey_prefix {
                     hp.as_str()
                 } else if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else if is_companion { "   \u{21b3} " } else { "  " };
-                let avail = name_chars.saturating_sub(prefix.chars().count());
+                let max_name_avail = name_chars.saturating_sub(prefix.chars().count());
                 let display_name = if name_counts.get(&session.name).copied().unwrap_or(0) > 1 {
                     let seen = name_seen.entry(session.name.clone()).or_insert(0);
                     *seen += 1;
@@ -470,19 +646,20 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     session.name.clone()
                 };
-                let name_text = truncate(&display_name, avail);
+                let name_text = truncate(&display_name, max_name_avail);
 
                 let prefix_fg = if is_current { ACCENT } else { FG };
 
-                let name_cell = if !app.search_input.is_empty() {
+                let mut spans: Vec<Span> = vec![Span::styled(
+                    prefix.to_string(),
+                    Style::default().fg(prefix_fg).bg(bg),
+                )];
+
+                if !app.search_input.is_empty() {
                     if let Some((positions, _)) = fuzzy_match(&session.name, &app.search_input) {
                         let max_pos = name_text.chars().count();
                         let highlight_set: std::collections::HashSet<usize> =
                             positions.into_iter().filter(|&p| p < max_pos).collect();
-                        let mut spans = vec![Span::styled(
-                            prefix.to_string(),
-                            Style::default().fg(prefix_fg).bg(bg),
-                        )];
                         let normal_style = Style::default().fg(name_fg).bg(bg);
                         let match_style = Style::default()
                             .fg(MATCH_FG)
@@ -493,66 +670,46 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                         for (ci, ch) in name_text.chars().enumerate() {
                             let is_match = highlight_set.contains(&ci);
                             if is_match != current_is_match && !current.is_empty() {
-                                let style =
-                                    if current_is_match { match_style } else { normal_style };
+                                let style = if current_is_match { match_style } else { normal_style };
                                 spans.push(Span::styled(std::mem::take(&mut current), style));
                             }
                             current.push(ch);
                             current_is_match = is_match;
                         }
                         if !current.is_empty() {
-                            let style =
-                                if current_is_match { match_style } else { normal_style };
+                            let style = if current_is_match { match_style } else { normal_style };
                             spans.push(Span::styled(current, style));
                         }
-                        Cell::from(Line::from(spans))
                     } else {
-                        let mut spans = vec![
-                            Span::styled(
-                                prefix.to_string(),
-                                Style::default().fg(prefix_fg).bg(bg),
-                            ),
-                        ];
                         spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
-                        Cell::from(Line::from(spans))
                     }
                 } else {
-                    let mut spans = vec![
-                        Span::styled(
-                            prefix.to_string(),
-                            Style::default().fg(prefix_fg).bg(bg),
-                        ),
-                    ];
                     spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
-                    Cell::from(Line::from(spans))
-                };
+                }
 
-                let proc_text = truncate(app.session_proc(&session.pid_name), proc_w as usize);
-
-                let proc_cell = if proc_text.is_empty() {
+                let proc = app.session_proc(&session.pid_name);
+                let status_cell = if proc.is_empty() {
                     Cell::from(Span::styled("\u{2500}", Style::default().fg(DIM).bg(bg)))
                 } else {
-                    Cell::from(Span::styled(proc_text, Style::default().fg(PROC_FG).bg(bg)))
+                    Cell::from(Span::styled(
+                        truncate(proc, status_w as usize),
+                        Style::default().fg(PROC_FG).bg(bg),
+                    ))
                 };
 
-                let note_text = app.notes.get(&session.name)
-                    .map(|n| truncate(n, note_w as usize))
-                    .unwrap_or_default();
-
                 let cells = vec![
-                    name_cell,
-                    proc_cell,
-                    Cell::from(Span::styled(note_text, Style::default().fg(NOTE_FG).bg(bg))),
+                    Cell::from(Line::from(spans)),
+                    status_cell,
                 ];
                 Row::new(cells).style(Style::default().fg(FG).bg(bg))
             }
+        }
         })
         .collect();
 
     let widths_vec = vec![
         Constraint::Length(name_w),
-        Constraint::Length(proc_w),
-        Constraint::Length(note_w),
+        Constraint::Length(status_w),
     ];
 
     let mut block = Block::default()
@@ -581,13 +738,30 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|n| app.constants.contains(&n))
         .unwrap_or(false);
 
-    let mut hints: Vec<(&str, &str)> = vec![
-        ("\u{23ce}","Attach"), ("d","Dup"), ("Tab","Cycle"), ("c","New"), ("x","Kill"), ("p","Pin"), ("C","Const"),
-    ];
+    let on_dir = matches!(app.selected_display_item(), Some(ListItem::TreeDir { .. }));
+
+    let mut hints: Vec<(&str, &str)> = Vec::new();
+    hints.push(("\u{23ce}","Attach"));
+    if on_dir {
+        hints.push(("h/l","Fold"));
+        hints.push(("z","FoldAll"));
+    } else {
+        hints.push(("d","Dup+label"));
+        hints.push(("\u{2190}/\u{2192}","Pill"));
+        hints.push(("Tab","Cycle"));
+        hints.push(("`","Back"));
+    }
+    hints.push(("/","Search"));
+    hints.push(("c","New"));
+    hints.push(("x","Kill"));
+    hints.push(("p","Pin"));
+    hints.push(("C","Const"));
     if on_constant {
         hints.push(("e", "Cmd"));
     }
-    hints.push(("s","Note"));
+    if !on_dir {
+        hints.push(("L","Label"));
+    }
     hints.push(("n","Rename"));
     if app.workspace_tree.as_ref().is_some_and(|t| t.children.iter().any(|c| !c.is_repo)) {
         hints.push(("O", "Order"));
@@ -595,7 +769,6 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     if !app.constants.is_empty() {
         hints.push(("R", "Reorder"));
     }
-    hints.push(("/","Search"));
     hints.push(("q","Quit"));
 
     for (i, (key, desc)) in hints.iter().enumerate() {
@@ -659,9 +832,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             .style(Style::default().fg(FG).bg(BASE_BG))
             .column_spacing(COL_SPACING)
             .row_highlight_style(
-                Style::default()
-                    .bg(HIGHLIGHT_BG)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("\u{2588} ");
 
@@ -1113,52 +1284,6 @@ fn draw_quit_modal(f: &mut Frame) {
     );
 }
 
-// ── Note modal ──────────────────────────────────────────────
-
-fn draw_note_modal(f: &mut Frame, app: &App) {
-    let name = app.selected_item_name().unwrap_or_default();
-    let area = f.area();
-    let width = 60u16.min(area.width.saturating_sub(4));
-    let height = 5u16;
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let modal_area = Rect::new(x, y, width, height);
-
-    f.render_widget(Clear, modal_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
-        .style(Style::default().fg(FG).bg(MODAL_BG))
-        .title(Span::styled(
-            format!(" Note: {name} "),
-            Style::default().fg(MODAL_TITLE).bg(MODAL_BG).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " Enter save  Esc cancel  Backspace clear ",
-            Style::default().fg(DIM).bg(MODAL_BG),
-        ));
-
-    let inner = block.inner(modal_area);
-    f.render_widget(block, modal_area);
-
-    let max_chars = inner.width.saturating_sub(2) as usize;
-    let display = visible_input(&app.create_input, app.cursor_pos, max_chars);
-
-    let lines = vec![
-        Line::from(Span::styled(" Note:", Style::default().fg(DIM).bg(MODAL_BG))),
-        Line::from(Span::styled(
-            format!(" {display}"),
-            Style::default().fg(NOTE_FG).bg(MODAL_BG).add_modifier(Modifier::BOLD),
-        )),
-    ];
-
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
-        inner,
-    );
-}
-
 fn draw_command_modal(f: &mut Frame, app: &App) {
     let name = app.selected_item_name().unwrap_or_default();
     let area = f.area();
@@ -1312,3 +1437,54 @@ fn draw_constant_ordering_modal(f: &mut Frame, app: &App) {
     );
 }
 
+
+
+fn draw_label_modal(f: &mut Frame, app: &App, creating: bool) {
+    let title = if creating { " New companion label " } else { " Edit label " };
+    let hint_line_top = if creating {
+        " Label this companion (optional):"
+    } else {
+        " Label:"
+    };
+
+    let area = f.area();
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let height = 5u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
+        .style(Style::default().fg(FG).bg(MODAL_BG))
+        .title(Span::styled(
+            title,
+            Style::default().fg(MODAL_TITLE).bg(MODAL_BG).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " Enter save  Esc cancel  Backspace clear ",
+            Style::default().fg(DIM).bg(MODAL_BG),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let max_chars = inner.width.saturating_sub(2) as usize;
+    let display = visible_input(&app.create_input, app.cursor_pos, max_chars);
+
+    let lines = vec![
+        Line::from(Span::styled(hint_line_top, Style::default().fg(DIM).bg(MODAL_BG))),
+        Line::from(Span::styled(
+            format!(" {display}"),
+            Style::default().fg(FG_BRIGHT).bg(MODAL_BG).add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
+        inner,
+    );
+}

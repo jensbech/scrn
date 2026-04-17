@@ -19,8 +19,9 @@ pub enum Mode {
     ConfirmQuit,
     Ordering,
     ConstantOrdering,
-    EditingNote,
     EditingCommand,
+    EditingLabel,
+    LabelNewCompanion,
 }
 
 pub enum Action {
@@ -45,12 +46,16 @@ pub enum ListItem {
     TreeDir {
         name: String,
         prefix: String,
+        path: PathBuf,
+        folded: bool,
+        descendant_repos: usize,
+        descendant_open: usize,
     },
     TreeRepo {
         name: String,
         path: PathBuf,
-        session: Option<Session>,
-        companions: Vec<Session>,
+        pills: Vec<Session>,
+        active_idx: usize,
         prefix: String,
     },
 }
@@ -93,10 +98,22 @@ pub struct App {
     pub dir_order: Vec<String>,
     pub ordering_items: Vec<String>,
     pub ordering_selected: usize,
-    /// in-memory notes per item name, not persisted to disk
-    pub notes: HashMap<String, String>,
     /// constant name -> command to run when opened
     pub constant_commands: HashMap<String, String>,
+    /// companion session name -> short label (e.g. "repo-2" -> "api")
+    pub companion_labels: HashMap<String, String>,
+    /// absolute paths of folded tree directories
+    pub folded_dirs: HashSet<String>,
+    /// repo name -> active pill index (ephemeral, per process)
+    pub repo_active_idx: HashMap<String, usize>,
+    /// previously-attached session name (for jump-to-last / backtick)
+    pub last_attached: Option<String>,
+    /// most-recently-attached session name (shifts into last_attached on next attach)
+    pub current_attached: Option<String>,
+    /// pending data for the "label-before-create" flow
+    pub pending_create: Option<(String, Option<PathBuf>)>,
+    /// session name currently being re-labeled
+    pub editing_label_target: Option<String>,
     /// sessions to restore on startup, loaded before refresh_sessions overwrites the file
     sessions_to_restore: Vec<(String, Option<PathBuf>)>,
 }
@@ -137,8 +154,14 @@ impl App {
             dir_order: load_dir_order(),
             ordering_items: Vec::new(),
             ordering_selected: 0,
-            notes: load_notes(),
             constant_commands: load_constant_commands(),
+            companion_labels: load_companion_labels(),
+            folded_dirs: load_folded_dirs(),
+            repo_active_idx: HashMap::new(),
+            last_attached: None,
+            current_attached: None,
+            pending_create: None,
+            editing_label_target: None,
             sessions_to_restore: load_saved_sessions(),
         }
     }
@@ -176,13 +199,6 @@ impl App {
             self.workspace_tree = workspace_tree;
         }
         save_sessions(&self.all_sessions, &self.workspace_tree);
-        // Prune notes for sessions that no longer exist.
-        let live: HashSet<String> = self.all_sessions.iter().map(|s| s.name.clone()).collect();
-        let before = self.notes.len();
-        self.notes.retain(|name, _| live.contains(name));
-        if self.notes.len() != before {
-            save_notes(&self.notes);
-        }
         self.apply_search_filter();
     }
 
@@ -194,12 +210,6 @@ impl App {
             self.workspace_tree = data.workspace_tree;
         }
         save_sessions(&self.all_sessions, &self.workspace_tree);
-        let live: HashSet<String> = self.all_sessions.iter().map(|s| s.name.clone()).collect();
-        let before = self.notes.len();
-        self.notes.retain(|name, _| live.contains(name));
-        if self.notes.len() != before {
-            save_notes(&self.notes);
-        }
         self.apply_search_filter();
     }
 
@@ -404,6 +414,7 @@ impl App {
                     &mut ws_items,
                     &mut ws_selectable,
                     &mut Vec::new(),
+                    &self.folded_dirs,
                 );
             } else {
                 let query = self.search_input.clone();
@@ -417,6 +428,14 @@ impl App {
                     &mut ws_selectable,
                     &mut Vec::new(),
                 );
+            }
+        }
+
+        // Inject active-idx per repo row so the UI knows which pill is current
+        for item in ws_items.iter_mut() {
+            if let ListItem::TreeRepo { name, pills, active_idx, .. } = item {
+                let want = self.repo_active_idx.get(name).copied().unwrap_or(0);
+                *active_idx = want.min(pills.len().saturating_sub(1));
             }
         }
 
@@ -493,7 +512,7 @@ impl App {
             let mut ws_remove: HashSet<usize> = HashSet::new();
             let mut orphan_remove: HashSet<usize> = HashSet::new();
 
-            let mut ws_by_name: HashMap<String, (usize, ListItem, Option<(usize, ListItem)>, Vec<ListItem>)> = HashMap::new();
+            let mut ws_by_name: HashMap<String, (usize, ListItem, Option<(usize, ListItem)>)> = HashMap::new();
             let mut last_dir_idx: Option<usize> = None;
             for (i, item) in ws_items.iter().enumerate() {
                 match item {
@@ -504,22 +523,7 @@ impl App {
                         if name_set.contains(name.as_str()) {
                             ws_remove.insert(i);
                             let dir = last_dir_idx.map(|di| (di, ws_items[di].clone()));
-                            let mut companion_rows: Vec<ListItem> = Vec::new();
-                            let mut j = i + 1;
-                            while j < ws_items.len() {
-                                if let ListItem::SessionItem(s) = &ws_items[j] {
-                                    if (2..=9).any(|n| s.name.ends_with(&format!("-{n}"))) {
-                                        ws_remove.insert(j);
-                                        companion_rows.push(ws_items[j].clone());
-                                        j += 1;
-                                    } else {
-                                        break;
-                                    }
-                                } else {
-                                    break;
-                                }
-                            }
-                            ws_by_name.insert(name.clone(), (i, item.clone(), dir, companion_rows));
+                            ws_by_name.insert(name.clone(), (i, item.clone(), dir));
                         }
                     }
                     _ => {}
@@ -546,11 +550,11 @@ impl App {
             } else {
                 let mut sorted: Vec<String> = name_set.iter().cloned().collect();
                 sorted.sort_by(|a, b| {
-                    let da = ws_by_name.get(a).and_then(|(_, _, d, _)| d.as_ref().map(|(di, _)| *di)).unwrap_or(usize::MAX);
-                    let db = ws_by_name.get(b).and_then(|(_, _, d, _)| d.as_ref().map(|(di, _)| *di)).unwrap_or(usize::MAX);
+                    let da = ws_by_name.get(a).and_then(|(_, _, d)| d.as_ref().map(|(di, _)| *di)).unwrap_or(usize::MAX);
+                    let db = ws_by_name.get(b).and_then(|(_, _, d)| d.as_ref().map(|(di, _)| *di)).unwrap_or(usize::MAX);
                     da.cmp(&db).then(
-                        ws_by_name.get(a).map(|(wi, _, _, _)| *wi).unwrap_or(usize::MAX)
-                            .cmp(&ws_by_name.get(b).map(|(wi, _, _, _)| *wi).unwrap_or(usize::MAX))
+                        ws_by_name.get(a).map(|(wi, _, _)| *wi).unwrap_or(usize::MAX)
+                            .cmp(&ws_by_name.get(b).map(|(wi, _, _)| *wi).unwrap_or(usize::MAX))
                     )
                 });
                 default_order = sorted;
@@ -558,7 +562,7 @@ impl App {
             };
 
             for name in iteration_order {
-                if let Some((_wi, repo_item, dir, companion_rows)) = ws_by_name.remove(name) {
+                if let Some((_wi, repo_item, dir)) = ws_by_name.remove(name) {
                     if show_dirs {
                         if let Some((di, dir_item)) = dir {
                             if last_dir != Some(di) {
@@ -569,10 +573,6 @@ impl App {
                     }
                     selectable.push(items.len());
                     items.push(repo_item);
-                    for companion_item in companion_rows {
-                        selectable.push(items.len());
-                        items.push(companion_item);
-                    }
                 } else if let Some((_oi, session_item)) = orphan_by_name.remove(name) {
                     selectable.push(items.len());
                     items.push(session_item);
@@ -671,6 +671,38 @@ impl App {
             self.display_items.push(ListItem::Separator);
         }
 
+        // Recents band — top 6 recently-attached sessions that still exist
+        // and aren't already surfaced as a pin or constant.
+        if !filter_active {
+            let claimed: HashSet<&str> = self.pins.iter().map(|s| s.as_str())
+                .chain(self.constants.iter().map(|s| s.as_str()))
+                .collect();
+            let live: HashSet<&str> = self.all_sessions.iter().map(|s| s.name.as_str()).collect();
+
+            let mut recents: Vec<(String, u64)> = self.history.iter()
+                .filter(|(n, _)| !claimed.contains(n.as_str()))
+                .filter(|(n, _)| live.contains(n.as_str()))
+                .filter(|(n, _)| !self.current_session.as_deref().is_some_and(|cs| cs.split('.').nth(1) == Some(n)))
+                .filter(|(n, _)| !n.starts_with("tmp-"))
+                .map(|(n, ts)| (n.clone(), *ts))
+                .collect();
+            recents.sort_by(|a, b| b.1.cmp(&a.1));
+            recents.truncate(6);
+
+            if !recents.is_empty() {
+                self.display_items.push(ListItem::SectionHeader("Recents".to_string()));
+                for (rname, _) in &recents {
+                    let Some(sess) = self.all_sessions.iter().find(|s| &s.name == rname).cloned() else {
+                        continue;
+                    };
+                    let idx = self.display_items.len();
+                    self.display_items.push(ListItem::SessionItem(sess));
+                    self.selectable_indices.push(idx);
+                }
+                self.display_items.push(ListItem::Separator);
+            }
+        }
+
         // When searching, hoist the group with the best match score first
         let orphans_first = if filter_active {
             let best_ws_score = ws_items.iter().filter_map(|item| {
@@ -717,8 +749,8 @@ impl App {
             let mut filtered_indices = Vec::new();
             for (i, item) in self.display_items.iter().enumerate() {
                 match item {
-                    ListItem::TreeRepo { name, session, .. } => {
-                        if session.is_some() && history.contains_key(name.as_str()) {
+                    ListItem::TreeRepo { name, pills, .. } => {
+                        if !pills.is_empty() && history.contains_key(name.as_str()) {
                             filtered_indices.push(filtered_items.len());
                             filtered_items.push(item.clone());
                         }
@@ -806,8 +838,8 @@ impl App {
                     self.action = Action::Attach(session.pid_name);
                 }
             }
-            ListItem::TreeRepo { name, path, session, .. } => {
-                if let Some(session) = session {
+            ListItem::TreeRepo { name, path, pills, active_idx, .. } => {
+                if let Some(session) = pills.get(active_idx).cloned() {
                     self.record_opened(&session.name);
                     self.action = Action::Attach(session.pid_name);
                 } else {
@@ -815,7 +847,10 @@ impl App {
                     self.action = Action::Create(name, Some(path));
                 }
             }
-            ListItem::SectionHeader(_) | ListItem::TreeDir { .. } | ListItem::Separator => {}
+            ListItem::TreeDir { path, folded, .. } => {
+                self.toggle_fold_dir(&path, !folded);
+            }
+            ListItem::SectionHeader(_) | ListItem::Separator => {}
         }
     }
 
@@ -885,16 +920,20 @@ impl App {
         match item {
             ListItem::TreeRepo { name, path, .. } => {
                 if let Some(dup_name) = Self::next_companion_name(&name, &self.all_sessions) {
-                    self.record_opened(&dup_name);
-                    self.action = Action::Create(dup_name, Some(path));
+                    self.pending_create = Some((dup_name, Some(path)));
+                    self.create_input.clear();
+                    self.cursor_pos = 0;
+                    self.mode = Mode::LabelNewCompanion;
                 }
             }
             ListItem::SessionItem(session) => {
                 let base = Self::companion_base_name(&session.name).to_string();
                 if let Some(dup_name) = Self::next_companion_name(&base, &self.all_sessions) {
                     if let Some(cwd) = screen::get_session_cwd(&session.pid_name) {
-                        self.record_opened(&dup_name);
-                        self.action = Action::Create(dup_name, Some(cwd));
+                        self.pending_create = Some((dup_name, Some(cwd)));
+                        self.create_input.clear();
+                        self.cursor_pos = 0;
+                        self.mode = Mode::LabelNewCompanion;
                     } else {
                         self.set_status("Could not determine session directory".to_string());
                     }
@@ -904,66 +943,209 @@ impl App {
         }
     }
 
-    pub fn cycle_companion(&mut self, forward: bool) {
-        let cur_name = match self.selected_item_name() {
-            Some(n) => n,
-            None => return,
-        };
-        let base = Self::companion_base_name(&cur_name).to_string();
+    pub fn confirm_label_new_companion(&mut self) {
+        let label = self.create_input.trim().to_string();
+        if let Some((name, dir)) = self.pending_create.take() {
+            if !label.is_empty() {
+                self.companion_labels.insert(name.clone(), label);
+                save_companion_labels(&self.companion_labels);
+            }
+            self.record_opened(&name);
+            let base = Self::companion_base_name(&name).to_string();
+            let pos = Self::companion_index(&name);
+            self.repo_active_idx.insert(base, pos);
+            self.action = Action::Create(name, dir);
+        }
+        self.create_input.clear();
+        self.cursor_pos = 0;
+        self.mode = Mode::Normal;
+    }
 
-        let mut sibling_indices: Vec<usize> = Vec::new();
-        for (sel_idx, &disp_idx) in self.selectable_indices.iter().enumerate() {
-            let name = match self.display_items.get(disp_idx) {
-                Some(ListItem::TreeRepo { name, .. }) => name.as_str(),
-                Some(ListItem::SessionItem(s)) => s.name.as_str(),
-                _ => continue,
-            };
-            if name == base || Self::companion_base_name(name) == base {
-                sibling_indices.push(sel_idx);
+    pub fn cancel_label_new_companion(&mut self) {
+        self.pending_create = None;
+        self.create_input.clear();
+        self.cursor_pos = 0;
+        self.mode = Mode::Normal;
+    }
+
+    /// For a session name like "repo-3", returns 2 (0-indexed pill). Base returns 0.
+    fn companion_index(name: &str) -> usize {
+        for n in 2..=9 {
+            let suffix = format!("-{n}");
+            if name.ends_with(&suffix) {
+                return n - 1;
             }
         }
+        0
+    }
 
-        if sibling_indices.is_empty() {
+    pub fn start_label_edit(&mut self) {
+        let item = match self.selected_display_item() {
+            Some(i) => i.clone(),
+            None => return,
+        };
+        let pill_name = match item {
+            ListItem::TreeRepo { pills, active_idx, .. } => {
+                pills.get(active_idx).map(|s| s.name.clone())
+            }
+            ListItem::SessionItem(s) => Some(s.name.clone()),
+            _ => None,
+        };
+        if let Some(name) = pill_name {
+            self.create_input = self.companion_labels.get(&name).cloned().unwrap_or_default();
+            self.cursor_pos = self.create_input.chars().count();
+            self.editing_label_target = Some(name);
+            self.mode = Mode::EditingLabel;
+        }
+    }
+
+    pub fn confirm_label_edit(&mut self) {
+        if let Some(name) = self.editing_label_target.take() {
+            let label = self.create_input.trim().to_string();
+            if label.is_empty() {
+                self.companion_labels.remove(&name);
+            } else {
+                self.companion_labels.insert(name, label);
+            }
+            save_companion_labels(&self.companion_labels);
+        }
+        self.create_input.clear();
+        self.cursor_pos = 0;
+        self.mode = Mode::Normal;
+    }
+
+    pub fn cancel_label_edit(&mut self) {
+        self.editing_label_target = None;
+        self.create_input.clear();
+        self.cursor_pos = 0;
+        self.mode = Mode::Normal;
+    }
+
+    pub fn cycle_companion(&mut self, forward: bool) {
+        let item = match self.selected_display_item() {
+            Some(i) => i.clone(),
+            None => return,
+        };
+        let ListItem::TreeRepo { name, path, pills, active_idx, .. } = item else {
+            return;
+        };
+        if pills.is_empty() {
+            self.record_opened(&name);
+            self.action = Action::Create(name, Some(path));
             return;
         }
 
-        let cur_pos = sibling_indices.iter().position(|&i| i == self.selected);
-
         if forward {
-            if let Some(pos) = cur_pos {
-                if pos + 1 < sibling_indices.len() {
-                    self.selected = sibling_indices[pos + 1];
-                    self.select_for_attach();
-                } else {
-                    let dir = self.display_items.iter().find_map(|item| {
-                        if let ListItem::TreeRepo { name, path, .. } = item {
-                            if name == &base { Some(path.clone()) } else { None }
-                        } else {
-                            None
-                        }
-                    });
-                    if let Some(dup_name) = Self::next_companion_name(&base, &self.all_sessions) {
-                        self.record_opened(&dup_name);
-                        self.action = Action::Create(dup_name, dir);
-                    } else {
-                        self.selected = sibling_indices[0];
-                        self.select_for_attach();
-                    }
-                }
+            if active_idx + 1 < pills.len() {
+                let new_idx = active_idx + 1;
+                self.repo_active_idx.insert(name.clone(), new_idx);
+                let sess = &pills[new_idx];
+                self.record_opened(&sess.name);
+                self.action = Action::Attach(sess.pid_name.clone());
+            } else if let Some(dup_name) = Self::next_companion_name(&name, &self.all_sessions) {
+                let new_idx = Self::companion_index(&dup_name);
+                self.repo_active_idx.insert(name.clone(), new_idx);
+                self.record_opened(&dup_name);
+                self.action = Action::Create(dup_name, Some(path));
             } else {
-                self.selected = sibling_indices[0];
-                self.select_for_attach();
+                self.repo_active_idx.insert(name.clone(), 0);
+                let sess = &pills[0];
+                self.record_opened(&sess.name);
+                self.action = Action::Attach(sess.pid_name.clone());
             }
         } else {
-            if let Some(pos) = cur_pos {
-                if pos > 0 {
-                    self.selected = sibling_indices[pos - 1];
-                } else {
-                    self.selected = *sibling_indices.last().unwrap();
-                }
-                self.select_for_attach();
-            }
+            let new_idx = if active_idx == 0 {
+                pills.len() - 1
+            } else {
+                active_idx - 1
+            };
+            self.repo_active_idx.insert(name.clone(), new_idx);
+            let sess = &pills[new_idx];
+            self.record_opened(&sess.name);
+            self.action = Action::Attach(sess.pid_name.clone());
         }
+    }
+
+    /// Move active pill left/right without opening — pure navigation.
+    pub fn shift_pill(&mut self, forward: bool) {
+        let item = match self.selected_display_item() {
+            Some(i) => i.clone(),
+            None => return,
+        };
+        let ListItem::TreeRepo { name, pills, active_idx, .. } = item else {
+            return;
+        };
+        if pills.len() <= 1 {
+            return;
+        }
+        let new_idx = if forward {
+            (active_idx + 1) % pills.len()
+        } else if active_idx == 0 {
+            pills.len() - 1
+        } else {
+            active_idx - 1
+        };
+        self.repo_active_idx.insert(name, new_idx);
+        self.rebuild_display_list();
+    }
+
+    pub fn toggle_fold_dir(&mut self, path: &PathBuf, fold: bool) {
+        let key = path.display().to_string();
+        if fold {
+            self.folded_dirs.insert(key);
+        } else {
+            self.folded_dirs.remove(&key);
+        }
+        save_folded_dirs(&self.folded_dirs);
+        self.rebuild_display_list();
+    }
+
+    pub fn fold_at_selection(&mut self, fold: bool) {
+        let item = match self.selected_display_item() {
+            Some(i) => i.clone(),
+            None => return,
+        };
+        if let ListItem::TreeDir { path, .. } = item {
+            self.toggle_fold_dir(&path, fold);
+        }
+    }
+
+    pub fn fold_all(&mut self) {
+        if let Some(ref tree) = self.workspace_tree {
+            let mut to_fold: Vec<PathBuf> = Vec::new();
+            collect_dir_paths(tree, &mut to_fold);
+            for p in to_fold {
+                self.folded_dirs.insert(p.display().to_string());
+            }
+            save_folded_dirs(&self.folded_dirs);
+            self.rebuild_display_list();
+        }
+    }
+
+    pub fn unfold_all(&mut self) {
+        self.folded_dirs.clear();
+        save_folded_dirs(&self.folded_dirs);
+        self.rebuild_display_list();
+    }
+
+    pub fn jump_to_last(&mut self) {
+        let name = match self.last_attached.clone() {
+            Some(n) => n,
+            None => {
+                self.set_status("No previous session".to_string());
+                return;
+            }
+        };
+        if let Some(session) = self.all_sessions.iter().find(|s| s.name == name).cloned() {
+            self.record_opened(&session.name);
+            self.action = Action::Attach(session.pid_name);
+        } else {
+            self.set_status(format!("'{name}' no longer exists"));
+        }
+    }
+
+    pub fn on_tree_dir(&self) -> bool {
+        matches!(self.selected_display_item(), Some(ListItem::TreeDir { .. }))
     }
 
     pub fn start_ordering(&mut self) {
@@ -1051,34 +1233,6 @@ impl App {
         }
     }
 
-    pub fn start_note_edit(&mut self) {
-        if let Some(name) = self.selected_item_name() {
-            self.create_input = self.notes.get(&name).cloned().unwrap_or_default();
-            self.cursor_pos = self.create_input.chars().count();
-            self.mode = Mode::EditingNote;
-        }
-    }
-
-    pub fn confirm_note(&mut self) {
-        if let Some(name) = self.selected_item_name() {
-            if self.create_input.is_empty() {
-                self.notes.remove(&name);
-            } else {
-                self.notes.insert(name, self.create_input.clone());
-            }
-            save_notes(&self.notes);
-        }
-        self.create_input.clear();
-        self.cursor_pos = 0;
-        self.mode = Mode::Normal;
-    }
-
-    pub fn cancel_note(&mut self) {
-        self.create_input.clear();
-        self.cursor_pos = 0;
-        self.mode = Mode::Normal;
-    }
-
     pub fn start_command_edit(&mut self) {
         if let Some(name) = self.selected_item_name() {
             if !self.constants.contains(&name) {
@@ -1157,8 +1311,9 @@ impl App {
             Some(ListItem::SessionItem(session)) => {
                 Some((session.name.clone(), session.pid_name.clone()))
             }
-            Some(ListItem::TreeRepo { session: Some(session), .. }) => {
-                Some((session.name.clone(), session.pid_name.clone()))
+            Some(ListItem::TreeRepo { pills, active_idx, .. }) if !pills.is_empty() => {
+                let s = &pills[(*active_idx).min(pills.len() - 1)];
+                Some((s.name.clone(), s.pid_name.clone()))
             }
             _ => None,
         };
@@ -1238,6 +1393,18 @@ impl App {
         save_history(&self.history);
     }
 
+    /// Stamp a newly-attached session. `last_attached` holds the session
+    /// *before* this one so backtick can jump back to it.
+    pub fn mark_attached(&mut self, name: &str) {
+        if self.current_attached.as_deref() == Some(name) {
+            return;
+        }
+        if let Some(prev) = self.current_attached.take() {
+            self.last_attached = Some(prev);
+        }
+        self.current_attached = Some(name.to_string());
+    }
+
     /// Return the foreground process name for the session identified by `pid_name`,
     /// or an empty string if the session is at an idle shell prompt.
     pub fn session_proc(&self, pid_name: &str) -> &str {
@@ -1276,12 +1443,28 @@ fn flatten_tree(
     display_items: &mut Vec<ListItem>,
     selectable_indices: &mut Vec<usize>,
     guide_lines: &mut Vec<bool>,
+    folded_dirs: &HashSet<String>,
 ) {
     let (iter_node, dir_prefix): (&TreeNode, String) = if !node.is_repo && depth == 0 {
         let has_direct_repos = node.children.iter().any(|c| c.is_repo);
         if has_direct_repos {
             let (compact_name, leaf) = compact_dir_chain(node);
-            display_items.push(ListItem::TreeDir { name: compact_name, prefix: String::new() });
+            let path_key = leaf.path.display().to_string();
+            let folded = folded_dirs.contains(&path_key);
+            let (descendant_repos, descendant_open) = count_repos(leaf, session_map);
+            let idx = display_items.len();
+            display_items.push(ListItem::TreeDir {
+                name: compact_name,
+                prefix: String::new(),
+                path: leaf.path.clone(),
+                folded,
+                descendant_repos,
+                descendant_open,
+            });
+            selectable_indices.push(idx);
+            if folded {
+                return;
+            }
             (leaf, String::new())
         } else {
             (node, format!("{}/", node.name))
@@ -1292,36 +1475,28 @@ fn flatten_tree(
 
     for child in iter_node.children.iter() {
         if child.is_repo {
-            let session = session_map.get(child.name.as_str()).cloned().cloned();
-            if let Some(ref s) = session {
+            let mut pills: Vec<Session> = Vec::new();
+            if let Some(s) = session_map.get(child.name.as_str()).cloned().cloned() {
                 merged.insert(s.name.clone());
+                pills.push(s);
             }
-            let mut companions = Vec::new();
             for n in 2..=9 {
                 let cname = format!("{}-{}", child.name, n);
                 if let Some(cs) = session_map.get(cname.as_str()).cloned().cloned() {
                     merged.insert(cname);
-                    companions.push(cs);
-                } else {
-                    break;
+                    pills.push(cs);
                 }
             }
 
-            let companion_rows = companions.clone();
             let idx = display_items.len();
             display_items.push(ListItem::TreeRepo {
                 name: child.name.clone(),
                 path: child.path.clone(),
-                session,
-                companions,
+                pills,
+                active_idx: 0,
                 prefix: " ".to_string(),
             });
             selectable_indices.push(idx);
-            for cs in companion_rows {
-                let cidx = display_items.len();
-                display_items.push(ListItem::SessionItem(cs));
-                selectable_indices.push(cidx);
-            }
         } else {
             let (compact_name, leaf) = compact_dir_chain(child);
             let full_name = if dir_prefix.is_empty() {
@@ -1329,12 +1504,47 @@ fn flatten_tree(
             } else {
                 format!("{}{}", dir_prefix, compact_name)
             };
-            display_items.push(ListItem::TreeDir { name: full_name, prefix: String::new() });
-            guide_lines.push(false);
-            flatten_tree(leaf, depth + 1, session_map, merged, display_items, selectable_indices, guide_lines);
-            guide_lines.pop();
+            let path_key = leaf.path.display().to_string();
+            let folded = folded_dirs.contains(&path_key);
+            let (descendant_repos, descendant_open) = count_repos(leaf, session_map);
+            let idx = display_items.len();
+            display_items.push(ListItem::TreeDir {
+                name: full_name,
+                prefix: String::new(),
+                path: leaf.path.clone(),
+                folded,
+                descendant_repos,
+                descendant_open,
+            });
+            selectable_indices.push(idx);
+            if !folded {
+                guide_lines.push(false);
+                flatten_tree(leaf, depth + 1, session_map, merged, display_items, selectable_indices, guide_lines, folded_dirs);
+                guide_lines.pop();
+            }
         }
     }
+}
+
+fn count_repos(
+    node: &TreeNode,
+    session_map: &std::collections::HashMap<&str, &Session>,
+) -> (usize, usize) {
+    let mut repos = 0usize;
+    let mut open = 0usize;
+    for child in &node.children {
+        if child.is_repo {
+            repos += 1;
+            if session_map.contains_key(child.name.as_str()) {
+                open += 1;
+            }
+        } else {
+            let (r, o) = count_repos(child, session_map);
+            repos += r;
+            open += o;
+        }
+    }
+    (repos, open)
 }
 
 fn flatten_filtered(
@@ -1357,7 +1567,17 @@ fn flatten_filtered(
         let has_direct_repos = node.children.iter().any(|c| c.is_repo && fuzzy_match(&c.name, query).is_some());
         if has_direct_repos {
             let (compact_name, leaf) = compact_dir_chain(node);
-            display_items.push(ListItem::TreeDir { name: compact_name, prefix: String::new() });
+            let (descendant_repos, descendant_open) = count_repos(leaf, session_map);
+            let idx = display_items.len();
+            display_items.push(ListItem::TreeDir {
+                name: compact_name,
+                prefix: String::new(),
+                path: leaf.path.clone(),
+                folded: false,
+                descendant_repos,
+                descendant_open,
+            });
+            selectable_indices.push(idx);
             (leaf, String::new())
         } else {
             (node, format!("{}/", node.name))
@@ -1380,36 +1600,28 @@ fn flatten_filtered(
 
     for child in visible_children.iter() {
         if child.is_repo {
-            let session = session_map.get(child.name.as_str()).cloned().cloned();
-            if let Some(ref s) = session {
+            let mut pills: Vec<Session> = Vec::new();
+            if let Some(s) = session_map.get(child.name.as_str()).cloned().cloned() {
                 merged.insert(s.name.clone());
+                pills.push(s);
             }
-            let mut companions = Vec::new();
             for n in 2..=9 {
                 let cname = format!("{}-{}", child.name, n);
                 if let Some(cs) = session_map.get(cname.as_str()).cloned().cloned() {
                     merged.insert(cname);
-                    companions.push(cs);
-                } else {
-                    break;
+                    pills.push(cs);
                 }
             }
 
-            let companion_rows = companions.clone();
             let idx = display_items.len();
             display_items.push(ListItem::TreeRepo {
                 name: child.name.clone(),
                 path: child.path.clone(),
-                session,
-                companions,
+                pills,
+                active_idx: 0,
                 prefix: " ".to_string(),
             });
             selectable_indices.push(idx);
-            for cs in companion_rows {
-                let cidx = display_items.len();
-                display_items.push(ListItem::SessionItem(cs));
-                selectable_indices.push(cidx);
-            }
         } else {
             let (compact_name, leaf) = compact_dir_chain(child);
             let full_name = if dir_prefix.is_empty() {
@@ -1417,7 +1629,17 @@ fn flatten_filtered(
             } else {
                 format!("{}{}", dir_prefix, compact_name)
             };
-            display_items.push(ListItem::TreeDir { name: full_name, prefix: String::new() });
+            let (descendant_repos, descendant_open) = count_repos(leaf, session_map);
+            let idx = display_items.len();
+            display_items.push(ListItem::TreeDir {
+                name: full_name,
+                prefix: String::new(),
+                path: leaf.path.clone(),
+                folded: false,
+                descendant_repos,
+                descendant_open,
+            });
+            selectable_indices.push(idx);
             guide_lines.push(false);
             flatten_filtered(leaf, depth + 1, query, session_map, merged, display_items, selectable_indices, guide_lines);
             guide_lines.pop();
@@ -1656,13 +1878,13 @@ fn save_dir_order(order: &[String]) {
     let _ = std::fs::write(&path, order.join("\n") + "\n");
 }
 
-fn notes_path() -> PathBuf {
+fn companion_labels_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config").join("scrn").join("notes")
+    PathBuf::from(home).join(".config").join("scrn").join("companion_labels")
 }
 
-fn load_notes() -> HashMap<String, String> {
-    let path = notes_path();
+fn load_companion_labels() -> HashMap<String, String> {
+    let path = companion_labels_path();
     let contents = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return HashMap::new(),
@@ -1670,23 +1892,56 @@ fn load_notes() -> HashMap<String, String> {
     contents
         .lines()
         .filter_map(|l| {
-            let (name, note) = l.split_once('\t')?;
-            if name.is_empty() || note.is_empty() { return None; }
-            Some((name.to_string(), note.to_string()))
+            let (name, label) = l.split_once('\t')?;
+            if name.is_empty() || label.is_empty() { return None; }
+            Some((name.to_string(), label.to_string()))
         })
         .collect()
 }
 
-fn save_notes(notes: &HashMap<String, String>) {
-    let path = notes_path();
+fn save_companion_labels(labels: &HashMap<String, String>) {
+    let path = companion_labels_path();
     let _ = std::fs::create_dir_all(path.parent().unwrap());
-    let mut lines: Vec<String> = notes
+    let mut lines: Vec<String> = labels
         .iter()
-        .map(|(name, note)| format!("{name}\t{note}"))
+        .map(|(name, label)| format!("{name}\t{label}"))
         .collect();
     lines.sort();
     let content = if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" };
     let _ = std::fs::write(&path, content);
+}
+
+fn folded_dirs_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".config").join("scrn").join("folded_dirs")
+}
+
+fn load_folded_dirs() -> HashSet<String> {
+    let path = folded_dirs_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashSet::new(),
+    };
+    contents.lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect()
+}
+
+fn save_folded_dirs(dirs: &HashSet<String>) {
+    let path = folded_dirs_path();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let mut lines: Vec<String> = dirs.iter().cloned().collect();
+    lines.sort();
+    let content = if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" };
+    let _ = std::fs::write(&path, content);
+}
+
+
+fn collect_dir_paths(node: &TreeNode, out: &mut Vec<PathBuf>) {
+    if !node.is_repo {
+        out.push(node.path.clone());
+        for child in &node.children {
+            collect_dir_paths(child, out);
+        }
+    }
 }
 
 /// Spawn a background thread that runs `screen -ls`, `ps`, and workspace scan

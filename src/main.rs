@@ -143,13 +143,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 t1.join().ok();
                 t2.join().ok();
 
-                let session_name = pid_name.split('.').nth(1).unwrap_or(pid_name);
-                if let Some(cmd) = app.constant_command(session_name) {
+                let session_name = pid_name.split('.').nth(1).unwrap_or(pid_name).to_string();
+                if let Some(cmd) = app.constant_command(&session_name) {
                     let stuff = format!("{}\n", cmd);
                     let _ = Command::new("screen")
                         .args(["-S", pid_name, "-X", "stuff", &stuff])
                         .status();
                 }
+
+                app.mark_attached(&session_name);
 
                 let rc = screen::ensure_screenrc();
                 let _ = Command::new("screen")
@@ -169,32 +171,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let has_command = app.constant_command(name).is_some();
 
-                if has_command {
-                    let mut cmd = Command::new("screen");
-                    cmd.args(["-c", &rc, "-dmS", name]);
-                    if let Some(ref dir) = maybe_dir {
-                        cmd.current_dir(dir);
-                    }
-                    let _ = cmd.status();
+                let mut cmd = Command::new("screen");
+                cmd.args(["-c", &rc, "-dmS", name]);
+                if let Some(ref dir) = maybe_dir {
+                    cmd.current_dir(dir);
+                }
+                let _ = cmd.status();
 
+                if has_command {
                     if let Some(c) = app.constant_command(name) {
                         let stuff = format!("{}\n", c);
                         let _ = Command::new("screen")
                             .args(["-S", name, "-X", "stuff", &stuff])
                             .status();
                     }
-
-                    let _ = Command::new("screen")
-                        .args(["-c", &rc, "-r", name])
-                        .status();
-                } else {
-                    let mut cmd = Command::new("screen");
-                    cmd.args(["-c", &rc, "-S", name]);
-                    if let Some(ref dir) = maybe_dir {
-                        cmd.current_dir(dir);
-                    }
-                    let _ = cmd.status();
                 }
+
+                app.mark_attached(name);
+
+                let _ = Command::new("screen")
+                    .args(["-c", &rc, "-r", name])
+                    .status();
 
                 reclaim_terminal(&mut terminal)?;
                 app.action = Action::None;
@@ -316,11 +313,30 @@ fn run_picker(
                         KeyCode::Enter => {
                             app.select_for_attach();
                         }
+                        KeyCode::Char('h') => app.fold_at_selection(true),
+                        KeyCode::Char('l') => app.fold_at_selection(false),
+                        KeyCode::Left => {
+                            if app.on_tree_dir() {
+                                app.fold_at_selection(true);
+                            } else {
+                                app.shift_pill(false);
+                            }
+                        }
+                        KeyCode::Right => {
+                            if app.on_tree_dir() {
+                                app.fold_at_selection(false);
+                            } else {
+                                app.shift_pill(true);
+                            }
+                        }
+                        KeyCode::Char('z') => app.fold_all(),
+                        KeyCode::Char('Z') => app.unfold_all(),
                         KeyCode::Char('c') => app.start_create(),
                         KeyCode::Char('n') => app.start_rename(),
                         KeyCode::Char('x') => app.start_kill(),
                         KeyCode::Char('X') => app.start_kill_all(),
-                        KeyCode::Char('/') => app.start_search(),
+                        KeyCode::Char('/') | KeyCode::Char(' ') => app.start_search(),
+                        KeyCode::Char('`') => app.jump_to_last(),
                         KeyCode::Char('p') => app.start_pin_confirm(),
                         KeyCode::Char('C') => app.start_constant_confirm(),
                         KeyCode::Tab => {
@@ -338,8 +354,8 @@ fn run_picker(
                         KeyCode::Char('r') => app.refresh_sessions(),
                         KeyCode::Char('t') => app.create_throwaway(),
                         KeyCode::Char('d') => app.duplicate_session(),
-                        KeyCode::Char('s') => app.start_note_edit(),
                         KeyCode::Char('e') => app.start_command_edit(),
+                        KeyCode::Char('L') => app.start_label_edit(),
                         KeyCode::Char('O') => app.start_ordering(),
                         KeyCode::Char('R') => app.start_constant_ordering(),
                         KeyCode::Char(ch @ '1'..='9') => app.select_constant(ch as usize - '0' as usize),
@@ -405,9 +421,9 @@ fn run_picker(
                         }
                         _ => {}
                     },
-                    Mode::EditingNote => match key.code {
-                        KeyCode::Enter => app.confirm_note(),
-                        KeyCode::Esc => app.cancel_note(),
+                    Mode::EditingCommand => match key.code {
+                        KeyCode::Enter => app.confirm_command(),
+                        KeyCode::Esc => app.cancel_command(),
                         KeyCode::Left => {
                             if app.cursor_pos > 0 {
                                 app.cursor_pos -= 1;
@@ -426,9 +442,30 @@ fn run_picker(
                         }
                         _ => {}
                     },
-                    Mode::EditingCommand => match key.code {
-                        KeyCode::Enter => app.confirm_command(),
-                        KeyCode::Esc => app.cancel_command(),
+                    Mode::EditingLabel => match key.code {
+                        KeyCode::Enter => app.confirm_label_edit(),
+                        KeyCode::Esc => app.cancel_label_edit(),
+                        KeyCode::Left => {
+                            if app.cursor_pos > 0 {
+                                app.cursor_pos -= 1;
+                            }
+                        }
+                        KeyCode::Right => {
+                            if app.cursor_pos < app.create_input.chars().count() {
+                                app.cursor_pos += 1;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            input_backspace(&mut app.create_input, &mut app.cursor_pos);
+                        }
+                        KeyCode::Char(c) => {
+                            input_insert(&mut app.create_input, &mut app.cursor_pos, c);
+                        }
+                        _ => {}
+                    },
+                    Mode::LabelNewCompanion => match key.code {
+                        KeyCode::Enter => app.confirm_label_new_companion(),
+                        KeyCode::Esc => app.cancel_label_new_companion(),
                         KeyCode::Left => {
                             if app.cursor_pos > 0 {
                                 app.cursor_pos -= 1;

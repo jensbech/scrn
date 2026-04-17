@@ -43,12 +43,8 @@ pub fn ensure_screenrc() -> String {
     }
     content.push_str("truecolor on\n");
     content.push_str("defscrollback 10000\n");
-    // Pass alternate screen sequences through so full-screen apps
-    // render correctly in the native terminal.
     content.push_str("altscreen on\n");
-    // Disable flow control so Ctrl+S is not eaten by the terminal driver
     content.push_str("defflow off\n");
-    // Ctrl+S detaches from screen, returning to the scrn picker
     content.push_str("bindkey \"^S\" detach\n");
 
     let _ = fs::write(&path, &content);
