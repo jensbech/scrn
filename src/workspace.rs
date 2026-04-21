@@ -50,6 +50,14 @@ fn scan_tree_recursive(dir: &Path, node: &mut TreeNode) {
         {
             continue;
         }
+        // Skip scrn-managed worktree pools: `<repo>.worktrees/`
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.ends_with(".worktrees"))
+        {
+            continue;
+        }
 
         let child_name = entry
             .file_name()

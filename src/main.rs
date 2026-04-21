@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod git;
 mod logging;
 mod screen;
 mod shell;
@@ -166,6 +167,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
             }
             Action::Create(ref name, ref maybe_dir) => {
+                // Resolve cwd first — may create a git worktree for companions.
+                let effective_dir = app.prepare_cwd_for_create(name, maybe_dir.as_deref());
+
                 yield_terminal(&mut terminal)?;
                 let rc = screen::ensure_screenrc();
 
@@ -173,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let mut cmd = Command::new("screen");
                 cmd.args(["-c", &rc, "-dmS", name]);
-                if let Some(ref dir) = maybe_dir {
+                if let Some(ref dir) = effective_dir {
                     cmd.current_dir(dir);
                 }
                 let _ = cmd.status();

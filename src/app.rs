@@ -2,8 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::git;
 use crate::screen::{self, Session};
 use crate::workspace::{self, TreeNode};
+
+#[derive(Clone, Debug)]
+pub struct WorktreeInfo {
+    pub repo_path: PathBuf,
+    pub worktree_path: PathBuf,
+}
 
 #[derive(PartialEq)]
 pub enum Mode {
@@ -97,6 +104,8 @@ pub struct App {
     pub constant_commands: HashMap<String, String>,
     /// companion session name -> short label (e.g. "repo-2" -> "api")
     pub companion_labels: HashMap<String, String>,
+    /// session name -> git worktree info (companions in git repos)
+    pub worktrees: HashMap<String, WorktreeInfo>,
     /// absolute paths of folded tree directories
     pub folded_dirs: HashSet<String>,
     /// repo name -> active pill index (ephemeral, per process)
@@ -149,6 +158,7 @@ impl App {
             ordering_selected: 0,
             constant_commands: load_constant_commands(),
             companion_labels: load_companion_labels(),
+            worktrees: load_worktrees(),
             folded_dirs: load_folded_dirs(),
             repo_active_idx: HashMap::new(),
             last_attached: None,
@@ -212,8 +222,17 @@ impl App {
             if live_names.contains(name) {
                 continue;
             }
-            let result = if let Some(dir) = path {
-                screen::create_session_in_dir(name, dir)
+            // If this session was a companion with a worktree, restore it at
+            // the worktree path so git ops keep working. Fall back to saved
+            // path (repo cwd) if the worktree is gone.
+            let effective_dir = self
+                .worktrees
+                .get(name)
+                .filter(|wt| wt.worktree_path.exists())
+                .map(|wt| wt.worktree_path.clone())
+                .or_else(|| path.clone());
+            let result = if let Some(dir) = effective_dir {
+                screen::create_session_in_dir(name, &dir)
             } else {
                 screen::create_session(name)
             };
@@ -796,8 +815,11 @@ impl App {
                     self.record_opened(&session.name);
                     self.action = Action::Attach(session.pid_name);
                 } else {
-                    self.record_opened(&name);
-                    self.action = Action::Create(name, Some(path));
+                    // Fresh pill — require a label before creating.
+                    self.pending_create = Some((name, Some(path)));
+                    self.create_input.clear();
+                    self.cursor_pos = 0;
+                    self.mode = Mode::LabelNewCompanion;
                 }
             }
             ListItem::TreeDir { path, folded, .. } => {
@@ -898,11 +920,13 @@ impl App {
 
     pub fn confirm_label_new_companion(&mut self) {
         let label = self.create_input.trim().to_string();
+        if label.is_empty() {
+            self.set_status("Name required".to_string());
+            return;
+        }
         if let Some((name, dir)) = self.pending_create.take() {
-            if !label.is_empty() {
-                self.companion_labels.insert(name.clone(), label);
-                save_companion_labels(&self.companion_labels);
-            }
+            self.companion_labels.insert(name.clone(), label);
+            save_companion_labels(&self.companion_labels);
             self.record_opened(&name);
             let base = Self::companion_base_name(&name).to_string();
             let pos = Self::companion_index(&name);
@@ -1101,6 +1125,74 @@ impl App {
         matches!(self.selected_display_item(), Some(ListItem::TreeDir { .. }))
     }
 
+    /// Decide the effective cwd for a freshly-created session. For pill-N in
+    /// a git repo, this creates a worktree under `<repo>.worktrees/<name>`
+    /// on branch `scrn/<name>` and records the mapping. Pill 1 (session
+    /// name == repo basename) and non-git dirs use the path as-is.
+    pub fn prepare_cwd_for_create(&mut self, name: &str, maybe_dir: Option<&std::path::Path>) -> Option<PathBuf> {
+        let dir = maybe_dir?;
+        let basename = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if name == basename || !git::is_repo(dir) {
+            return Some(dir.to_path_buf());
+        }
+
+        let parent = dir.parent().unwrap_or(dir);
+        let wt_root = parent.join(format!("{basename}.worktrees"));
+        let _ = std::fs::create_dir_all(&wt_root);
+        let wt_path = wt_root.join(name);
+        if wt_path.exists() {
+            // Reuse an existing worktree directory if it's already recorded.
+            if let Some(info) = self.worktrees.get(name) {
+                return Some(info.worktree_path.clone());
+            }
+            // Otherwise fall back to repo cwd — don't clobber unknown state.
+            self.set_status(format!("Worktree path exists; using repo cwd for '{name}'"));
+            return Some(dir.to_path_buf());
+        }
+
+        match git::create_worktree(dir, &wt_path) {
+            Ok(()) => {
+                self.worktrees.insert(
+                    name.to_string(),
+                    WorktreeInfo {
+                        repo_path: dir.to_path_buf(),
+                        worktree_path: wt_path.clone(),
+                    },
+                );
+                save_worktrees(&self.worktrees);
+                Some(wt_path)
+            }
+            Err(e) => {
+                self.set_status(format!("Worktree: {e}"));
+                Some(dir.to_path_buf())
+            }
+        }
+    }
+
+    /// Clean up a worktree for a session after it's been killed. Silent on
+    /// success. If the worktree has uncommitted changes, keep it on disk
+    /// and drop the mapping (user can rescue manually).
+    pub fn cleanup_worktree_for(&mut self, name: &str) {
+        let Some(info) = self.worktrees.remove(name) else { return };
+        save_worktrees(&self.worktrees);
+
+        if !info.worktree_path.exists() {
+            return;
+        }
+        if git::is_worktree_dirty(&info.worktree_path) {
+            self.set_status(format!(
+                "Worktree kept at {} (uncommitted changes)",
+                info.worktree_path.display()
+            ));
+            return;
+        }
+        let _ = git::remove_worktree(&info.worktree_path, false);
+    }
+
     pub fn start_ordering(&mut self) {
         if let Some(ref tree) = self.workspace_tree {
             let dirs: Vec<String> = tree.children.iter()
@@ -1249,7 +1341,11 @@ impl App {
         if let Some((name, pid_name)) = self.kill_session_info.take() {
             match screen::kill_session(&pid_name) {
                 Ok(()) => {
-                    self.set_status(format!("Killed '{name}'"));
+                    self.cleanup_worktree_for(&name);
+                    // Only overwrite status if cleanup_worktree_for didn't set one.
+                    if !self.status_msg.starts_with("Worktree") {
+                        self.set_status(format!("Killed '{name}'"));
+                    }
                     self.refresh_sessions();
                 }
                 Err(e) => {
@@ -1283,7 +1379,10 @@ impl App {
                 continue;
             }
             match screen::kill_session(&session.pid_name) {
-                Ok(()) => killed += 1,
+                Ok(()) => {
+                    self.cleanup_worktree_for(&session.name);
+                    killed += 1;
+                }
                 Err(e) => errors.push(e),
             }
         }
@@ -1816,6 +1915,55 @@ fn save_companion_labels(labels: &HashMap<String, String>) {
     let mut lines: Vec<String> = labels
         .iter()
         .map(|(name, label)| format!("{name}\t{label}"))
+        .collect();
+    lines.sort();
+    let content = if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" };
+    let _ = std::fs::write(&path, content);
+}
+
+fn worktrees_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".config").join("scrn").join("worktrees")
+}
+
+fn load_worktrees() -> HashMap<String, WorktreeInfo> {
+    let path = worktrees_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let mut map = HashMap::new();
+    for line in contents.lines() {
+        if line.is_empty() { continue; }
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() < 3 { continue; }
+        let name = parts[0];
+        let repo = PathBuf::from(parts[1]);
+        let wt = PathBuf::from(parts[2]);
+        if !wt.exists() {
+            continue;
+        }
+        map.insert(name.to_string(), WorktreeInfo {
+            repo_path: repo,
+            worktree_path: wt,
+        });
+    }
+    map
+}
+
+fn save_worktrees(worktrees: &HashMap<String, WorktreeInfo>) {
+    let path = worktrees_path();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let mut lines: Vec<String> = worktrees
+        .iter()
+        .map(|(name, info)| {
+            format!(
+                "{}\t{}\t{}",
+                name,
+                info.repo_path.display(),
+                info.worktree_path.display()
+            )
+        })
         .collect();
     lines.sort();
     let content = if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" };
