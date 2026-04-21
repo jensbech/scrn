@@ -656,38 +656,6 @@ impl App {
             self.display_items.push(ListItem::Separator);
         }
 
-        // Recents band — top 6 recently-attached sessions that still exist
-        // and aren't already surfaced as a pin or constant.
-        if !filter_active {
-            let claimed: HashSet<&str> = self.pins.iter().map(|s| s.as_str())
-                .chain(self.constants.iter().map(|s| s.as_str()))
-                .collect();
-            let live: HashSet<&str> = self.all_sessions.iter().map(|s| s.name.as_str()).collect();
-
-            let mut recents: Vec<(String, u64)> = self.history.iter()
-                .filter(|(n, _)| !claimed.contains(n.as_str()))
-                .filter(|(n, _)| live.contains(n.as_str()))
-                .filter(|(n, _)| !self.current_session.as_deref().is_some_and(|cs| cs.split('.').nth(1) == Some(n)))
-                .filter(|(n, _)| !n.starts_with("tmp-"))
-                .map(|(n, ts)| (n.clone(), *ts))
-                .collect();
-            recents.sort_by(|a, b| b.1.cmp(&a.1));
-            recents.truncate(6);
-
-            if !recents.is_empty() {
-                self.display_items.push(ListItem::SectionHeader("Recents".to_string()));
-                for (rname, _) in &recents {
-                    let Some(sess) = self.all_sessions.iter().find(|s| &s.name == rname).cloned() else {
-                        continue;
-                    };
-                    let idx = self.display_items.len();
-                    self.display_items.push(ListItem::SessionItem(sess));
-                    self.selectable_indices.push(idx);
-                }
-                self.display_items.push(ListItem::Separator);
-            }
-        }
-
         // When searching, hoist the group with the best match score first
         let orphans_first = if filter_active {
             let best_ws_score = ws_items.iter().filter_map(|item| {

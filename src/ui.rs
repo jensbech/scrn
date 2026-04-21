@@ -294,7 +294,6 @@ fn dim_background(f: &mut Frame) {
 fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     const COL_SPACING: u16 = 2;
     const BORDERS: u16 = 2;
-    const HIGHLIGHT_SYM: u16 = 2;
     const MIN_NAME_W: u16 = 10;
     const MAX_DIR_NAME_CHARS: usize = 24;
 
@@ -338,7 +337,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         (max as u16).max(1)
     };
 
-    let fixed_base = (COL_SPACING * 2) + BORDERS + HIGHLIGHT_SYM;
+    let fixed_base = (COL_SPACING * 2) + BORDERS;
     let available = area.width.saturating_sub(fixed_base);
 
     let want = max_name_chars + tabs_w;
@@ -747,8 +746,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             .column_spacing(COL_SPACING)
             .row_highlight_style(
                 Style::default().add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("\u{2588} ");
+            );
 
         // borders(2) + header(1) + header bottom_margin(1) = 4
         let visible_rows = area.height.saturating_sub(4) as usize;
