@@ -12,12 +12,6 @@ use ratatui::Frame;
 use crate::app::{fuzzy_match, App, ListItem, Mode};
 use crate::screen::Session;
 
-const PILL_ACTIVE_BG: Color = Color::Rgb(80, 130, 200);
-const PILL_IDLE_BG: Color = Color::Rgb(45, 45, 65);
-const PILL_PROC_BG: Color = Color::Rgb(55, 90, 55);
-const PILL_ACTIVE_SEL_BG: Color = Color::Rgb(120, 170, 240);
-const PILL_IDLE_SEL_BG: Color = Color::Rgb(80, 80, 110);
-const PILL_PROC_SEL_BG: Color = Color::Rgb(90, 140, 90);
 
 fn pill_label(session_name: &str, labels: &HashMap<String, String>) -> String {
     if let Some(l) = labels.get(session_name) {
@@ -35,21 +29,28 @@ fn pills_display_width(pills: &[Session], labels: &HashMap<String, String>) -> u
     if pills.is_empty() {
         return 0;
     }
-    let mut w = 1;
-    for p in pills {
+    let mut w = 0;
+    for (i, p) in pills.iter().enumerate() {
         let lbl = pill_label(&p.name, labels);
-        w += 2 + lbl.chars().count() + 1;
+        // "[label]" = 2 brackets + label chars
+        w += 2 + lbl.chars().count();
+        if i + 1 < pills.len() {
+            w += 1; // single-space separator
+        }
     }
     w
 }
 
-/// Status column: one colored proc blob per pill, separated by " · ".
-fn build_pill_status_spans(
+
+/// Render pills as `[N]` text. Only the row under the cursor shows its active
+/// pill in GREEN; everything else is a dim outline. No bg fill anywhere —
+/// this keeps the table reading as a single grid rather than a collage.
+fn build_pill_spans(
     pills: &[Session],
     active_idx: usize,
-    app: &App,
+    labels: &HashMap<String, String>,
     row_bg: Color,
-    _is_selected: bool,
+    row_is_selected: bool,
 ) -> Vec<Span<'static>> {
     let mut out: Vec<Span<'static>> = Vec::new();
     if pills.is_empty() {
@@ -57,61 +58,19 @@ fn build_pill_status_spans(
     }
     for (i, p) in pills.iter().enumerate() {
         if i > 0 {
-            out.push(Span::styled(" \u{00b7} ".to_string(), Style::default().fg(DIM).bg(row_bg)));
+            out.push(Span::styled(" ".to_string(), Style::default().bg(row_bg)));
         }
-        let proc = app.session_proc(&p.pid_name).to_string();
-        let is_active = i == active_idx;
-        let (text, fg, modifier) = if proc.is_empty() {
-            ("\u{2500}".to_string(), DIM, Modifier::empty())
-        } else {
-            let m = if is_active { Modifier::BOLD } else { Modifier::empty() };
-            (proc, PROC_FG, m)
-        };
-        out.push(Span::styled(
-            text,
-            Style::default().fg(fg).bg(row_bg).add_modifier(modifier),
-        ));
-    }
-    out
-}
-
-fn build_pill_spans(
-    pills: &[Session],
-    active_idx: usize,
-    labels: &HashMap<String, String>,
-    proc_flags: &[bool],
-    row_bg: Color,
-    is_selected: bool,
-) -> Vec<Span<'static>> {
-    let mut out: Vec<Span<'static>> = Vec::new();
-    if pills.is_empty() {
-        return out;
-    }
-    out.push(Span::styled(" ".to_string(), Style::default().bg(row_bg)));
-    for (i, p) in pills.iter().enumerate() {
         let lbl = pill_label(&p.name, labels);
-        let has_proc = *proc_flags.get(i).unwrap_or(&false);
-        let is_active = i == active_idx;
-        let bg = match (is_selected, is_active, has_proc) {
-            (true, true, _) => PILL_ACTIVE_SEL_BG,
-            (true, false, true) => PILL_PROC_SEL_BG,
-            (true, false, false) => PILL_IDLE_SEL_BG,
-            (false, true, _) => PILL_ACTIVE_BG,
-            (false, false, true) => PILL_PROC_BG,
-            (false, false, false) => PILL_IDLE_BG,
-        };
-        let fg = if is_active { FG_BRIGHT } else { FG };
+        let is_active = row_is_selected && i == active_idx;
+        let fg = if is_active { GREEN } else { DIM };
         let mut modifier = Modifier::empty();
         if is_active {
             modifier |= Modifier::BOLD;
         }
         out.push(Span::styled(
-            format!(" {lbl} "),
-            Style::default().fg(fg).bg(bg).add_modifier(modifier),
+            format!("[{lbl}]"),
+            Style::default().fg(fg).bg(row_bg).add_modifier(modifier),
         ));
-        if i < pills.len() - 1 {
-            out.push(Span::styled(" ".to_string(), Style::default().bg(row_bg)));
-        }
     }
     out
 }
@@ -139,7 +98,6 @@ const KILL_BG: Color = Color::Rgb(30, 15, 15);
 const KILL_TITLE: Color = Color::Rgb(220, 140, 140);
 const DIM_FG: Color = Color::Rgb(50, 50, 60);
 const DIM_BG: Color = Color::Rgb(10, 10, 15);
-const PROC_FG: Color = Color::Rgb(160, 190, 140);
 const VERSION_FG: Color = Color::Rgb(80, 80, 100);
 const COUNT_FG: Color = Color::Rgb(100, 100, 120);
 const SECTION_FG: Color = Color::Rgb(140, 120, 180);
@@ -269,10 +227,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             dim_background(f);
             draw_create_modal(f, app);
         }
-        Mode::Renaming => {
-            dim_background(f);
-            draw_rename_modal(f, app);
-        }
         Mode::ConfirmPin => {
             dim_background(f);
             draw_pin_modal(f, app);
@@ -342,21 +296,22 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     const BORDERS: u16 = 2;
     const HIGHLIGHT_SYM: u16 = 2;
     const MIN_NAME_W: u16 = 10;
-    const PILL_GUTTER: u16 = 2;
+    const MAX_DIR_NAME_CHARS: usize = 24;
 
-    // Alignment plan: every "selectable" row pads its name+prefix to the same
-    // visual width so pills (or procs) line up on a fixed column.
+    // Name column width = longest name+prefix across all selectable rows.
+    // Folder names are capped; repos/sessions always show in full so custom
+    // labels and repo names have the room they need.
     let max_name_chars = {
         let mut max = MIN_NAME_W as usize;
         for item in &app.display_items {
             let n = match item {
                 ListItem::SessionItem(s) => session_prefix_width(s, app) + s.name.chars().count(),
                 ListItem::TreeRepo { name, prefix, .. } => {
-                    // "  " hotkey slot + prefix + name
                     2 + prefix.chars().count() + name.chars().count()
                 }
                 ListItem::TreeDir { name, descendant_repos, descendant_open, folded, .. } => {
-                    let base = 2 + name.chars().count() + 1;
+                    let name_w = name.chars().count().min(MAX_DIR_NAME_CHARS);
+                    let base = 2 + name_w + 1;
                     if *folded {
                         base + 2 + format!("{descendant_repos}").chars().count()
                             + if *descendant_open > 0 { format!(" ({descendant_open} open)").chars().count() } else { 0 }
@@ -371,29 +326,8 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         max as u16
     };
 
-    // Status column: max width of `proc1 · proc2 · ...` across rows.
-    let max_status_chars = {
-        let mut max = 0usize;
-        for item in &app.display_items {
-            let n = match item {
-                ListItem::SessionItem(s) => app.session_proc(&s.pid_name).chars().count(),
-                ListItem::TreeRepo { pills, .. } => {
-                    let mut total = 0usize;
-                    for (i, p) in pills.iter().enumerate() {
-                        let pr = app.session_proc(&p.pid_name);
-                        total += if pr.is_empty() { 1 } else { pr.chars().count() };
-                        if i + 1 < pills.len() { total += 3; }
-                    }
-                    total
-                }
-                _ => continue,
-            };
-            if n > max { max = n; }
-        }
-        max as u16
-    };
-
-    let pills_w = {
+    // Tabs column: widest pill-strip across TreeRepo rows.
+    let tabs_w = {
         let mut max = 0usize;
         for item in &app.display_items {
             if let ListItem::TreeRepo { pills, .. } = item {
@@ -401,27 +335,22 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 if w > max { max = w; }
             }
         }
-        max as u16
+        (max as u16).max(1)
     };
 
     let fixed_base = (COL_SPACING * 2) + BORDERS + HIGHLIGHT_SYM;
     let available = area.width.saturating_sub(fixed_base);
 
-    let want_name = max_name_chars + PILL_GUTTER + pills_w;
-    let (name_w, status_w) = if want_name + max_status_chars <= available {
-        (want_name, max_status_chars)
+    let want = max_name_chars + tabs_w;
+    let (name_w, tabs_col_w) = if want <= available {
+        (max_name_chars, tabs_w)
     } else {
-        let name_priority = (available * 2 / 3).max(MIN_NAME_W);
-        let sw = max_status_chars.min(available.saturating_sub(name_priority));
-        let nw = available.saturating_sub(sw).max(MIN_NAME_W);
-        (nw, sw)
+        let nw = available.saturating_sub(tabs_w).max(MIN_NAME_W);
+        (nw, tabs_w)
     };
 
     let name_chars = name_w as usize;
-    // The column at which pills start: padded to the widest repo/session name.
-    let name_align_width = (max_name_chars as usize).min(
-        name_chars.saturating_sub(PILL_GUTTER as usize + pills_w as usize)
-    );
+    let name_align_width = (max_name_chars as usize).min(name_chars);
 
     let header_style = Style::default()
         .fg(HEADER_FG)
@@ -430,7 +359,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let header_cells = vec![
         Cell::from("Name"),
-        Cell::from("Status"),
+        Cell::from("Tabs"),
     ];
     let header = Row::new(header_cells)
     .style(header_style)
@@ -473,7 +402,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             }
             ListItem::Separator => {
                 let line_char = "\u{2500}";
-                let total_w = (name_w + status_w + COL_SPACING) as usize;
+                let total_w = (name_w + tabs_col_w + COL_SPACING) as usize;
                 let line_str: String = line_char.repeat(total_w);
                 let cells = vec![
                     Cell::from(Span::styled(
@@ -502,8 +431,9 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                         Style::default().fg(TREE_GUIDE).bg(bg),
                     ));
                 }
+                let truncated = truncate(name, MAX_DIR_NAME_CHARS);
                 spans.push(Span::styled(
-                    format!("{name}/"),
+                    format!("{truncated}/"),
                     Style::default()
                         .fg(SECTION_FG)
                         .bg(bg)
@@ -552,9 +482,8 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 let has_session = !pills.is_empty();
                 let name_fg = if has_session { GREEN } else { REPO_FG };
 
-                let max_name_avail = name_align_width.saturating_sub(used_prefix);
+                let max_name_avail = name_chars.saturating_sub(used_prefix);
                 let name_text = truncate(name, max_name_avail);
-                let pad_after_name = max_name_avail.saturating_sub(name_text.chars().count());
 
                 let mut spans: Vec<Span> = Vec::new();
                 spans.push(Span::styled(hotkey_prefix.clone(), Style::default().fg(DIM).bg(bg)));
@@ -592,24 +521,13 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
                 }
 
-                if pad_after_name > 0 {
-                    spans.push(Span::styled(" ".repeat(pad_after_name), Style::default().bg(bg)));
-                }
-                // Fixed gutter so pills start at the same column across rows.
-                spans.push(Span::styled(" ".repeat(PILL_GUTTER as usize), Style::default().bg(bg)));
+                let _ = name_align_width;
 
-                let proc_flags: Vec<bool> = pills
-                    .iter()
-                    .map(|p| !app.session_proc(&p.pid_name).is_empty())
-                    .collect();
-                let pill_spans = build_pill_spans(pills, *active_idx, &app.companion_labels, &proc_flags, bg, is_selected);
-                spans.extend(pill_spans);
-
-                let status_spans = build_pill_status_spans(pills, *active_idx, app, bg, is_selected);
+                let tab_spans = build_pill_spans(pills, *active_idx, &app.companion_labels, bg, is_selected);
 
                 let cells = vec![
                     Cell::from(Line::from(spans)),
-                    Cell::from(Line::from(status_spans)),
+                    Cell::from(Line::from(tab_spans)),
                 ];
                 Row::new(cells).style(Style::default().fg(FG).bg(bg))
             }
@@ -635,16 +553,22 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     hp.as_str()
                 } else if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else if is_companion { "   \u{21b3} " } else { "  " };
                 let max_name_avail = name_chars.saturating_sub(prefix.chars().count());
+                // Prefer the user-facing label over the internal screen name.
+                let base_name = app
+                    .companion_labels
+                    .get(&session.name)
+                    .cloned()
+                    .unwrap_or_else(|| session.name.clone());
                 let display_name = if name_counts.get(&session.name).copied().unwrap_or(0) > 1 {
                     let seen = name_seen.entry(session.name.clone()).or_insert(0);
                     *seen += 1;
                     if *seen > 1 {
-                        format!("{} \u{b7}{}", session.name, seen)
+                        format!("{} \u{b7}{}", base_name, seen)
                     } else {
-                        session.name.clone()
+                        base_name
                     }
                 } else {
-                    session.name.clone()
+                    base_name
                 };
                 let name_text = truncate(&display_name, max_name_avail);
 
@@ -687,19 +611,9 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
                 }
 
-                let proc = app.session_proc(&session.pid_name);
-                let status_cell = if proc.is_empty() {
-                    Cell::from(Span::styled("\u{2500}", Style::default().fg(DIM).bg(bg)))
-                } else {
-                    Cell::from(Span::styled(
-                        truncate(proc, status_w as usize),
-                        Style::default().fg(PROC_FG).bg(bg),
-                    ))
-                };
-
                 let cells = vec![
                     Cell::from(Line::from(spans)),
-                    status_cell,
+                    Cell::from(Span::styled("", Style::default().bg(bg))),
                 ];
                 Row::new(cells).style(Style::default().fg(FG).bg(bg))
             }
@@ -709,7 +623,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let widths_vec = vec![
         Constraint::Length(name_w),
-        Constraint::Length(status_w),
+        Constraint::Length(tabs_col_w),
     ];
 
     let mut block = Block::default()
@@ -948,53 +862,6 @@ fn draw_create_modal(f: &mut Frame, app: &App) {
     let lines = vec![
         Line::from(Span::styled(
             " Session name:",
-            Style::default().fg(DIM).bg(MODAL_BG),
-        )),
-        Line::from(Span::styled(
-            format!(" {display}"),
-            Style::default().fg(FG_BRIGHT).bg(MODAL_BG),
-        )),
-    ];
-
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
-        inner,
-    );
-}
-
-// ── Rename modal ────────────────────────────────────────────
-
-fn draw_rename_modal(f: &mut Frame, app: &App) {
-    let area = f.area();
-    let width = 50u16.min(area.width.saturating_sub(4));
-    let height = 5u16;
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let modal_area = Rect::new(x, y, width, height);
-
-    f.render_widget(Clear, modal_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
-        .style(Style::default().fg(FG).bg(MODAL_BG))
-        .title(Span::styled(
-            " Rename Session ",
-            Style::default()
-                .fg(MODAL_TITLE)
-                .bg(MODAL_BG)
-                .add_modifier(Modifier::BOLD),
-        ));
-
-    let inner = block.inner(modal_area);
-    f.render_widget(block, modal_area);
-
-    let max_chars = inner.width.saturating_sub(2) as usize;
-    let display = visible_input(&app.create_input, app.cursor_pos, max_chars);
-
-    let lines = vec![
-        Line::from(Span::styled(
-            " New name:",
             Style::default().fg(DIM).bg(MODAL_BG),
         )),
         Line::from(Span::styled(
@@ -1440,7 +1307,7 @@ fn draw_constant_ordering_modal(f: &mut Frame, app: &App) {
 
 
 fn draw_label_modal(f: &mut Frame, app: &App, creating: bool) {
-    let title = if creating { " New companion label " } else { " Edit label " };
+    let title = if creating { " Name new companion " } else { " Rename " };
     let hint_line_top = if creating {
         " Label this companion (optional):"
     } else {

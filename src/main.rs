@@ -332,7 +332,7 @@ fn run_picker(
                         KeyCode::Char('z') => app.fold_all(),
                         KeyCode::Char('Z') => app.unfold_all(),
                         KeyCode::Char('c') => app.start_create(),
-                        KeyCode::Char('n') => app.start_rename(),
+                        KeyCode::Char('n') => app.start_label_edit(),
                         KeyCode::Char('x') => app.start_kill(),
                         KeyCode::Char('X') => app.start_kill_all(),
                         KeyCode::Char('/') | KeyCode::Char(' ') => app.start_search(),
@@ -382,27 +382,6 @@ fn run_picker(
                     Mode::Creating => match key.code {
                         KeyCode::Enter => app.confirm_create(),
                         KeyCode::Esc => app.cancel_create(),
-                        KeyCode::Left => {
-                            if app.cursor_pos > 0 {
-                                app.cursor_pos -= 1;
-                            }
-                        }
-                        KeyCode::Right => {
-                            if app.cursor_pos < app.create_input.chars().count() {
-                                app.cursor_pos += 1;
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            input_backspace(&mut app.create_input, &mut app.cursor_pos);
-                        }
-                        KeyCode::Char(c) => {
-                            input_insert(&mut app.create_input, &mut app.cursor_pos, c);
-                        }
-                        _ => {}
-                    },
-                    Mode::Renaming => match key.code {
-                        KeyCode::Enter => app.confirm_rename(),
-                        KeyCode::Esc => app.cancel_rename(),
                         KeyCode::Left => {
                             if app.cursor_pos > 0 {
                                 app.cursor_pos -= 1;

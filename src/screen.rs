@@ -226,20 +226,6 @@ pub fn kill_session(pid_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn rename_session(pid_name: &str, new_name: &str) -> Result<(), String> {
-    let output = Command::new("screen")
-        .args(["-S", pid_name, "-X", "sessionname", new_name])
-        .output()
-        .map_err(|e| format!("Failed to rename session: {e}"))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("Failed to rename session: {}", stderr.trim()))
-    }
-}
-
 pub fn create_session(name: &str) -> Result<(), String> {
     let rc = ensure_screenrc();
     let output = Command::new("screen")
@@ -272,110 +258,6 @@ fn is_shell_or_screen(args: &str) -> bool {
     let first = args.split_whitespace().next().unwrap_or(args);
     let base = argv0_base(first);
     base.is_empty() || base == "screen" || SHELL_NAMES.contains(&base)
-}
-
-/// Basename any token that looks like an absolute path.
-fn normalize_token(token: &str) -> &str {
-    if token.starts_with('/') || token.starts_with('~') {
-        token.rsplit('/').next().unwrap_or(token)
-    } else {
-        token
-    }
-}
-
-/// Replace full paths in argv[0] and any path-like arguments with their basenames.
-/// `/usr/local/bin/npm run dev`          → `npm run dev`
-/// `node /Users/jens/project/server.js`  → `node server.js`
-fn normalize_args(args: &str) -> String {
-    let mut tokens = args.split_whitespace();
-    let Some(argv0) = tokens.next() else { return String::new() };
-    let mut parts = vec![argv0_base(argv0).to_string()];
-    for token in tokens {
-        parts.push(normalize_token(token).to_string());
-    }
-    parts.join(" ")
-}
-
-/// Parsed output of a single `ps -axo pid=,ppid=,args=` call.
-/// Can be built independently of knowing which session PIDs to query.
-pub struct ProcessMap {
-    args_map: HashMap<u32, String>,
-    children: HashMap<u32, Vec<u32>>,
-}
-
-impl Default for ProcessMap {
-    fn default() -> Self {
-        Self {
-            args_map: HashMap::new(),
-            children: HashMap::new(),
-        }
-    }
-}
-
-/// Run `ps -axo` once and return the parsed process tree.
-/// This is the slow part (subprocess); split from the BFS so it can run in parallel.
-pub fn build_process_map() -> ProcessMap {
-    let output = match Command::new("ps").args(["-axo", "pid=,ppid=,args="]).output() {
-        Ok(o) => o,
-        Err(_) => return ProcessMap::default(),
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-
-    let mut args_map: HashMap<u32, String> = HashMap::new();
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        let Some((pid_str, rest)) = trimmed.split_once(|c: char| c.is_ascii_whitespace()) else { continue };
-        let rest = rest.trim_start();
-        let Some((ppid_str, args_str)) = rest.split_once(|c: char| c.is_ascii_whitespace()) else { continue };
-        let Some(pid) = pid_str.parse::<u32>().ok() else { continue };
-        let Some(ppid) = ppid_str.parse::<u32>().ok() else { continue };
-        let args = args_str.trim_start().to_string();
-        args_map.insert(pid, args);
-        children.entry(ppid).or_default().push(pid);
-    }
-
-    ProcessMap { args_map, children }
-}
-
-/// BFS through a pre-built process map to find the foreground process for each session.
-/// Pure computation — no subprocess.
-pub fn foreground_from_map(map: &ProcessMap, session_pids: &[u32]) -> HashMap<u32, String> {
-    if session_pids.is_empty() {
-        return HashMap::new();
-    }
-
-    let mut result: HashMap<u32, String> = HashMap::new();
-    'outer: for &screen_pid in session_pids {
-        let mut frontier = vec![screen_pid];
-        let mut visited = std::collections::HashSet::new();
-        visited.insert(screen_pid);
-
-        for _ in 0..4 {
-            let mut next = Vec::new();
-            for pid in frontier {
-                let Some(kids) = map.children.get(&pid) else { continue };
-                for &kid in kids {
-                    if !visited.insert(kid) {
-                        continue;
-                    }
-                    let args = map.args_map.get(&kid).map(|s| s.as_str()).unwrap_or("");
-                    if is_shell_or_screen(args) {
-                        next.push(kid);
-                    } else {
-                        result.insert(screen_pid, normalize_args(args));
-                        continue 'outer;
-                    }
-                }
-            }
-            frontier = next;
-            if frontier.is_empty() {
-                break;
-            }
-        }
-    }
-    result
 }
 
 

@@ -10,7 +10,6 @@ pub enum Mode {
     Normal,
     Searching,
     Creating,
-    Renaming,
     ConfirmPin,
     ConfirmConstant,
     ConfirmKill,
@@ -34,7 +33,6 @@ pub enum Action {
 /// Data collected by a refresh — can be built on a background thread.
 pub struct RefreshData {
     pub sessions: Vec<Session>,
-    pub foreground_procs: HashMap<u32, String>,
     pub workspace_tree: Option<TreeNode>,
 }
 
@@ -72,7 +70,6 @@ pub struct App {
     pub status_set_at: Instant,
     pub current_session: Option<String>,
     pub action: Action,
-    pub rename_pid_name: String,
     pub workspace_dir: Option<PathBuf>,
     pub workspace_tree: Option<TreeNode>,
     pub display_items: Vec<ListItem>,
@@ -82,8 +79,6 @@ pub struct App {
     pub kill_session_info: Option<(String, String)>,
     pub pre_search_selected: usize,
     pub search_filter_active: bool,
-    /// screen PID -> foreground process name (empty = idle shell)
-    pub foreground_procs: HashMap<u32, String>,
     /// session name -> unix timestamp of last attach
     pub history: HashMap<String, u64>,
     pub filter_opened: bool,
@@ -132,7 +127,6 @@ impl App {
             status_set_at: Instant::now(),
             current_session: std::env::var("STY").ok(),
             action: Action::None,
-            rename_pid_name: String::new(),
             workspace_dir: workspace,
             workspace_tree: None,
             display_items: Vec::new(),
@@ -142,7 +136,6 @@ impl App {
             kill_session_info: None,
             pre_search_selected: 0,
             search_filter_active: true,
-            foreground_procs: HashMap::new(),
             history: load_history(),
             filter_opened: false,
             pins: load_pins(),
@@ -169,9 +162,8 @@ impl App {
     pub fn refresh_sessions(&mut self) {
         let dir = self.workspace_dir.clone();
         let dir_order = self.dir_order.clone();
-        let (sessions, process_map, workspace_tree) = std::thread::scope(|s| {
+        let (sessions, workspace_tree) = std::thread::scope(|s| {
             let sessions_h = s.spawn(|| screen::list_sessions());
-            let ps_h = s.spawn(|| screen::build_process_map());
             let tree_h = s.spawn(move || {
                 dir.as_ref().map(|d| {
                     let mut tree = workspace::scan_tree(d);
@@ -182,19 +174,13 @@ impl App {
                 })
             });
             let sessions = sessions_h.join().unwrap_or(Ok(Vec::new()));
-            let ps = ps_h.join().unwrap_or_default();
             let tree = tree_h.join().unwrap_or(None);
-            (sessions, ps, tree)
+            (sessions, tree)
         });
         match sessions {
             Ok(s) => self.all_sessions = s,
             Err(e) => self.set_status(format!("Error: {e}")),
         }
-        let pids: Vec<u32> = self.all_sessions
-            .iter()
-            .filter_map(|s| s.pid_name.split('.').next()?.parse().ok())
-            .collect();
-        self.foreground_procs = screen::foreground_from_map(&process_map, &pids);
         if workspace_tree.is_some() {
             self.workspace_tree = workspace_tree;
         }
@@ -205,7 +191,6 @@ impl App {
     /// Apply a completed background refresh to app state.
     pub fn apply_refresh_data(&mut self, data: RefreshData) {
         self.all_sessions = data.sessions;
-        self.foreground_procs = data.foreground_procs;
         if data.workspace_tree.is_some() {
             self.workspace_tree = data.workspace_tree;
         }
@@ -863,19 +848,19 @@ impl App {
     pub fn confirm_create(&mut self) {
         let name = self.create_input.trim().to_string();
         if name.is_empty() {
-            self.mode = Mode::Normal;
+            self.set_status("Name required".to_string());
             return;
         }
         match screen::create_session(&name) {
             Ok(()) => {
                 self.set_status(format!("Created session '{name}'"));
                 self.refresh_sessions();
+                self.mode = Mode::Normal;
             }
             Err(e) => {
                 self.set_status(format!("Error: {e}"));
             }
         }
-        self.mode = Mode::Normal;
     }
 
     pub fn cancel_create(&mut self) {
@@ -1275,37 +1260,6 @@ impl App {
         }
     }
 
-    pub fn start_rename(&mut self) {
-        if let Some(ListItem::SessionItem(session)) = self.selected_display_item().cloned() {
-            self.rename_pid_name = session.pid_name;
-            self.create_input = session.name;
-            self.cursor_pos = self.create_input.chars().count();
-            self.mode = Mode::Renaming;
-        }
-    }
-
-    pub fn confirm_rename(&mut self) {
-        let new_name = self.create_input.trim().to_string();
-        if new_name.is_empty() {
-            self.mode = Mode::Normal;
-            return;
-        }
-        match screen::rename_session(&self.rename_pid_name, &new_name) {
-            Ok(()) => {
-                self.set_status(format!("Renamed to '{new_name}'"));
-                self.refresh_sessions();
-            }
-            Err(e) => {
-                self.set_status(format!("Error: {e}"));
-            }
-        }
-        self.mode = Mode::Normal;
-    }
-
-    pub fn cancel_rename(&mut self) {
-        self.mode = Mode::Normal;
-    }
-
     pub fn start_kill(&mut self) {
         let info = match self.selected_display_item() {
             Some(ListItem::SessionItem(session)) => {
@@ -1404,17 +1358,6 @@ impl App {
         }
         self.current_attached = Some(name.to_string());
     }
-
-    /// Return the foreground process name for the session identified by `pid_name`,
-    /// or an empty string if the session is at an idle shell prompt.
-    pub fn session_proc(&self, pid_name: &str) -> &str {
-        let pid: u32 = match pid_name.split('.').next().and_then(|s| s.parse().ok()) {
-            Some(p) => p,
-            None => return "",
-        };
-        self.foreground_procs.get(&pid).map(|s| s.as_str()).unwrap_or("")
-    }
-
 
 }
 
@@ -1953,9 +1896,8 @@ pub fn spawn_refresh(
 ) -> std::sync::mpsc::Receiver<RefreshData> {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let (sessions, process_map, workspace_tree) = std::thread::scope(|s| {
+        let (sessions, workspace_tree) = std::thread::scope(|s| {
             let sessions_h = s.spawn(|| screen::list_sessions().unwrap_or_default());
-            let ps_h = s.spawn(|| screen::build_process_map());
             let tree_h = s.spawn(move || {
                 workspace_dir.as_ref().map(|d| {
                     let mut tree = workspace::scan_tree(d);
@@ -1966,18 +1908,11 @@ pub fn spawn_refresh(
                 })
             });
             let sessions = sessions_h.join().unwrap_or_default();
-            let ps = ps_h.join().unwrap_or_default();
             let tree = tree_h.join().unwrap_or(None);
-            (sessions, ps, tree)
+            (sessions, tree)
         });
-        let pids: Vec<u32> = sessions
-            .iter()
-            .filter_map(|s| s.pid_name.split('.').next()?.parse().ok())
-            .collect();
-        let foreground_procs = screen::foreground_from_map(&process_map, &pids);
         let _ = tx.send(RefreshData {
             sessions,
-            foreground_procs,
             workspace_tree,
         });
     });
