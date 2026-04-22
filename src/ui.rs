@@ -32,8 +32,8 @@ fn pills_display_width(pills: &[Session], labels: &HashMap<String, String>) -> u
     let mut w = 0;
     for (i, p) in pills.iter().enumerate() {
         let lbl = pill_label(&p.name, labels);
-        // "[•label]" or "[ label]" — brackets + indicator slot + label.
-        w += 3 + lbl.chars().count();
+        // "[label]" — two brackets + label.
+        w += 2 + lbl.chars().count();
         if i + 1 < pills.len() {
             w += 1;
         }
@@ -45,6 +45,10 @@ fn pills_display_width(pills: &[Session], labels: &HashMap<String, String>) -> u
 /// Render pills as `[N]` text. Only the row under the cursor shows its active
 /// pill in GREEN; everything else is a dim outline. No bg fill anywhere —
 /// this keeps the table reading as a single grid rather than a collage.
+/// Pill = `[label]`. Brackets turn green when the pill's session has a
+/// foreground process running; otherwise they stay dim. The label color
+/// signals selection (green+bold under the cursor, dim elsewhere). This
+/// gives four distinct visual states in the same 2+label width.
 fn build_pill_spans(
     pills: &[Session],
     active_idx: usize,
@@ -64,22 +68,18 @@ fn build_pill_spans(
         let lbl = pill_label(&p.name, labels);
         let is_active = row_is_selected && i == active_idx;
         let running = *has_proc.get(i).unwrap_or(&false);
-        let fg = if is_active { GREEN } else { DIM };
-        let mut modifier = Modifier::empty();
+        let label_fg = if is_active { GREEN } else { DIM };
+        let bracket_fg = if running { GREEN } else { DIM };
+        let mut label_mod = Modifier::empty();
         if is_active {
-            modifier |= Modifier::BOLD;
+            label_mod |= Modifier::BOLD;
         }
-        let pill_style = Style::default().fg(fg).bg(row_bg).add_modifier(modifier);
-        let dot_style = Style::default().fg(GREEN).bg(row_bg);
+        let bracket_style = Style::default().fg(bracket_fg).bg(row_bg);
+        let label_style = Style::default().fg(label_fg).bg(row_bg).add_modifier(label_mod);
 
-        out.push(Span::styled("[".to_string(), pill_style));
-        if running {
-            out.push(Span::styled("\u{2022}".to_string(), dot_style));
-        } else {
-            out.push(Span::styled(" ".to_string(), pill_style));
-        }
-        out.push(Span::styled(lbl, pill_style));
-        out.push(Span::styled("]".to_string(), pill_style));
+        out.push(Span::styled("[".to_string(), bracket_style));
+        out.push(Span::styled(lbl, label_style));
+        out.push(Span::styled("]".to_string(), bracket_style));
     }
     out
 }
