@@ -32,10 +32,10 @@ fn pills_display_width(pills: &[Session], labels: &HashMap<String, String>) -> u
     let mut w = 0;
     for (i, p) in pills.iter().enumerate() {
         let lbl = pill_label(&p.name, labels);
-        // "[label]" = 2 brackets + label chars
-        w += 2 + lbl.chars().count();
+        // "[•label]" or "[ label]" — brackets + indicator slot + label.
+        w += 3 + lbl.chars().count();
         if i + 1 < pills.len() {
-            w += 1; // single-space separator
+            w += 1;
         }
     }
     w
@@ -49,6 +49,7 @@ fn build_pill_spans(
     pills: &[Session],
     active_idx: usize,
     labels: &HashMap<String, String>,
+    has_proc: &[bool],
     row_bg: Color,
     row_is_selected: bool,
 ) -> Vec<Span<'static>> {
@@ -62,15 +63,23 @@ fn build_pill_spans(
         }
         let lbl = pill_label(&p.name, labels);
         let is_active = row_is_selected && i == active_idx;
+        let running = *has_proc.get(i).unwrap_or(&false);
         let fg = if is_active { GREEN } else { DIM };
         let mut modifier = Modifier::empty();
         if is_active {
             modifier |= Modifier::BOLD;
         }
-        out.push(Span::styled(
-            format!("[{lbl}]"),
-            Style::default().fg(fg).bg(row_bg).add_modifier(modifier),
-        ));
+        let pill_style = Style::default().fg(fg).bg(row_bg).add_modifier(modifier);
+        let dot_style = Style::default().fg(GREEN).bg(row_bg);
+
+        out.push(Span::styled("[".to_string(), pill_style));
+        if running {
+            out.push(Span::styled("\u{2022}".to_string(), dot_style));
+        } else {
+            out.push(Span::styled(" ".to_string(), pill_style));
+        }
+        out.push(Span::styled(lbl, pill_style));
+        out.push(Span::styled("]".to_string(), pill_style));
     }
     out
 }
@@ -522,7 +531,11 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
                 let _ = name_align_width;
 
-                let tab_spans = build_pill_spans(pills, *active_idx, &app.companion_labels, bg, is_selected);
+                let proc_flags: Vec<bool> = pills
+                    .iter()
+                    .map(|p| app.session_has_proc(&p.pid_name))
+                    .collect();
+                let tab_spans = build_pill_spans(pills, *active_idx, &app.companion_labels, &proc_flags, bg, is_selected);
 
                 let cells = vec![
                     Cell::from(Line::from(spans)),

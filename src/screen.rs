@@ -260,6 +260,77 @@ fn is_shell_or_screen(args: &str) -> bool {
     base.is_empty() || base == "screen" || SHELL_NAMES.contains(&base)
 }
 
+/// Parsed `ps -axo pid=,ppid=,args=` output. Built once, reused for every
+/// session lookup so we shell out only once per refresh.
+#[derive(Default)]
+pub struct ProcessMap {
+    args_map: HashMap<u32, String>,
+    children: HashMap<u32, Vec<u32>>,
+}
+
+pub fn build_process_map() -> ProcessMap {
+    let output = match Command::new("ps").args(["-axo", "pid=,ppid=,args="]).output() {
+        Ok(o) => o,
+        Err(_) => return ProcessMap::default(),
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    let mut args_map: HashMap<u32, String> = HashMap::new();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some((pid_str, rest)) = trimmed.split_once(|c: char| c.is_ascii_whitespace()) else { continue };
+        let rest = rest.trim_start();
+        let Some((ppid_str, args_str)) = rest.split_once(|c: char| c.is_ascii_whitespace()) else { continue };
+        let Some(pid) = pid_str.parse::<u32>().ok() else { continue };
+        let Some(ppid) = ppid_str.parse::<u32>().ok() else { continue };
+        args_map.insert(pid, args_str.trim_start().to_string());
+        children.entry(ppid).or_default().push(pid);
+    }
+
+    ProcessMap { args_map, children }
+}
+
+/// For each screen session pid, return `true` if it has a non-shell
+/// foreground process somewhere in its child tree.
+pub fn has_foreground_from_map(map: &ProcessMap, session_pids: &[u32]) -> HashMap<u32, bool> {
+    if session_pids.is_empty() {
+        return HashMap::new();
+    }
+    let mut result: HashMap<u32, bool> = HashMap::new();
+    'outer: for &screen_pid in session_pids {
+        let mut frontier = vec![screen_pid];
+        let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        visited.insert(screen_pid);
+
+        for _ in 0..4 {
+            let mut next = Vec::new();
+            for pid in frontier {
+                let Some(kids) = map.children.get(&pid) else { continue };
+                for &kid in kids {
+                    if !visited.insert(kid) {
+                        continue;
+                    }
+                    let args = map.args_map.get(&kid).map(|s| s.as_str()).unwrap_or("");
+                    if is_shell_or_screen(args) {
+                        next.push(kid);
+                    } else {
+                        result.insert(screen_pid, true);
+                        continue 'outer;
+                    }
+                }
+            }
+            frontier = next;
+            if frontier.is_empty() {
+                break;
+            }
+        }
+        result.insert(screen_pid, false);
+    }
+    result
+}
+
 
 fn get_process_cwd(pid: u32) -> Option<PathBuf> {
     // Linux: /proc/<pid>/cwd symlink
