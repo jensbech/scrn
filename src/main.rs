@@ -254,7 +254,8 @@ fn hit_test_row(app: &App, row: u16) -> Option<usize> {
     if row < app.table_data_y || row >= app.table_data_end_y {
         return None;
     }
-    let visual_idx = (row - app.table_data_y) as usize + app.table_scroll_offset;
+    let row_height = ui::ROW_HEIGHT.max(1);
+    let visual_idx = ((row - app.table_data_y) / row_height) as usize + app.table_scroll_offset;
     app.selectable_indices.iter().position(|&si| si == visual_idx)
 }
 
@@ -313,26 +314,11 @@ fn run_picker(
                         KeyCode::Enter => {
                             app.select_for_attach();
                         }
-                        KeyCode::Char('h') => app.fold_at_selection(true),
-                        KeyCode::Char('l') => app.fold_at_selection(false),
-                        KeyCode::Left => {
-                            if app.on_tree_dir() {
-                                app.fold_at_selection(true);
-                            } else {
-                                app.shift_pill(false);
-                            }
-                        }
-                        KeyCode::Right => {
-                            if app.on_tree_dir() {
-                                app.fold_at_selection(false);
-                            } else {
-                                app.shift_pill(true);
-                            }
-                        }
+                        KeyCode::Char('h') | KeyCode::Left => app.fold_at_selection(true),
+                        KeyCode::Char('l') | KeyCode::Right => app.fold_at_selection(false),
                         KeyCode::Char('z') => app.fold_all(),
                         KeyCode::Char('Z') => app.unfold_all(),
                         KeyCode::Char('c') => app.start_create(),
-                        KeyCode::Char('n') => app.start_label_edit(),
                         KeyCode::Char('x') => app.start_kill(),
                         KeyCode::Char('X') => app.start_kill_all(),
                         KeyCode::Char('/') | KeyCode::Char(' ') => app.start_search(),
@@ -342,23 +328,14 @@ fn run_picker(
                         KeyCode::Tab => {
                             if !app.search_input.is_empty() {
                                 app.toggle_search_filter();
-                            } else {
-                                app.cycle_companion(true);
-                            }
-                        }
-                        KeyCode::BackTab => {
-                            if app.search_input.is_empty() {
-                                app.cycle_companion(false);
                             }
                         }
                         KeyCode::Char('r') => app.refresh_sessions(),
                         KeyCode::Char('t') => app.create_throwaway(),
-                        KeyCode::Char('d') => app.duplicate_session(),
                         KeyCode::Char('e') => app.start_command_edit(),
-                        KeyCode::Char('L') => app.start_label_edit(),
                         KeyCode::Char('O') => app.start_ordering(),
                         KeyCode::Char('R') => app.start_constant_ordering(),
-                        KeyCode::Char(ch @ '1'..='9') => app.select_constant(ch as usize - '0' as usize),
+                        KeyCode::Char(ch @ '1'..='4') => app.select_slot(ch as usize - '1' as usize),
                         _ => {}
                     },
                     Mode::Searching => match key.code {
@@ -403,48 +380,6 @@ fn run_picker(
                     Mode::EditingCommand => match key.code {
                         KeyCode::Enter => app.confirm_command(),
                         KeyCode::Esc => app.cancel_command(),
-                        KeyCode::Left => {
-                            if app.cursor_pos > 0 {
-                                app.cursor_pos -= 1;
-                            }
-                        }
-                        KeyCode::Right => {
-                            if app.cursor_pos < app.create_input.chars().count() {
-                                app.cursor_pos += 1;
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            input_backspace(&mut app.create_input, &mut app.cursor_pos);
-                        }
-                        KeyCode::Char(c) => {
-                            input_insert(&mut app.create_input, &mut app.cursor_pos, c);
-                        }
-                        _ => {}
-                    },
-                    Mode::EditingLabel => match key.code {
-                        KeyCode::Enter => app.confirm_label_edit(),
-                        KeyCode::Esc => app.cancel_label_edit(),
-                        KeyCode::Left => {
-                            if app.cursor_pos > 0 {
-                                app.cursor_pos -= 1;
-                            }
-                        }
-                        KeyCode::Right => {
-                            if app.cursor_pos < app.create_input.chars().count() {
-                                app.cursor_pos += 1;
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            input_backspace(&mut app.create_input, &mut app.cursor_pos);
-                        }
-                        KeyCode::Char(c) => {
-                            input_insert(&mut app.create_input, &mut app.cursor_pos, c);
-                        }
-                        _ => {}
-                    },
-                    Mode::LabelNewCompanion => match key.code {
-                        KeyCode::Enter => app.confirm_label_new_companion(),
-                        KeyCode::Esc => app.cancel_label_new_companion(),
                         KeyCode::Left => {
                             if app.cursor_pos > 0 {
                                 app.cursor_pos -= 1;

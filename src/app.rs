@@ -19,9 +19,9 @@ pub enum Mode {
     Ordering,
     ConstantOrdering,
     EditingCommand,
-    EditingLabel,
-    LabelNewCompanion,
 }
+
+pub const SLOT_COUNT: usize = 4;
 
 pub enum Action {
     None,
@@ -53,8 +53,7 @@ pub enum ListItem {
     TreeRepo {
         name: String,
         path: PathBuf,
-        pills: Vec<Session>,
-        active_idx: usize,
+        slots: [Option<Session>; SLOT_COUNT],
         prefix: String,
     },
 }
@@ -98,20 +97,12 @@ pub struct App {
     pub ordering_selected: usize,
     /// constant name -> command to run when opened
     pub constant_commands: HashMap<String, String>,
-    /// companion session name -> short label (e.g. "repo-2" -> "api")
-    pub companion_labels: HashMap<String, String>,
     /// absolute paths of folded tree directories
     pub folded_dirs: HashSet<String>,
-    /// repo name -> active pill index (ephemeral, per process)
-    pub repo_active_idx: HashMap<String, usize>,
     /// previously-attached session name (for jump-to-last / backtick)
     pub last_attached: Option<String>,
     /// most-recently-attached session name (shifts into last_attached on next attach)
     pub current_attached: Option<String>,
-    /// pending data for the "label-before-create" flow
-    pub pending_create: Option<(String, Option<PathBuf>)>,
-    /// session name currently being re-labeled
-    pub editing_label_target: Option<String>,
     /// sessions to restore on startup, loaded before refresh_sessions overwrites the file
     sessions_to_restore: Vec<(String, Option<PathBuf>)>,
 }
@@ -152,13 +143,9 @@ impl App {
             ordering_items: Vec::new(),
             ordering_selected: 0,
             constant_commands: load_constant_commands(),
-            companion_labels: load_companion_labels(),
             folded_dirs: load_folded_dirs(),
-            repo_active_idx: HashMap::new(),
             last_attached: None,
             current_attached: None,
-            pending_create: None,
-            editing_label_target: None,
             sessions_to_restore: load_saved_sessions(),
         }
     }
@@ -434,14 +421,6 @@ impl App {
                     &mut ws_selectable,
                     &mut Vec::new(),
                 );
-            }
-        }
-
-        // Inject active-idx per repo row so the UI knows which pill is current
-        for item in ws_items.iter_mut() {
-            if let ListItem::TreeRepo { name, pills, active_idx, .. } = item {
-                let want = self.repo_active_idx.get(name).copied().unwrap_or(0);
-                *active_idx = want.min(pills.len().saturating_sub(1));
             }
         }
 
@@ -723,8 +702,8 @@ impl App {
             let mut filtered_indices = Vec::new();
             for (i, item) in self.display_items.iter().enumerate() {
                 match item {
-                    ListItem::TreeRepo { name, pills, .. } => {
-                        if !pills.is_empty() && history.contains_key(name.as_str()) {
+                    ListItem::TreeRepo { name, slots, .. } => {
+                        if slots.iter().any(|s| s.is_some()) && history.contains_key(name.as_str()) {
                             filtered_indices.push(filtered_items.len());
                             filtered_items.push(item.clone());
                         }
@@ -812,17 +791,9 @@ impl App {
                     self.action = Action::Attach(session.pid_name);
                 }
             }
-            ListItem::TreeRepo { name, path, pills, active_idx, .. } => {
-                if let Some(session) = pills.get(active_idx).cloned() {
-                    self.record_opened(&session.name);
-                    self.action = Action::Attach(session.pid_name);
-                } else {
-                    // Fresh pill — require a label before creating.
-                    self.pending_create = Some((name, Some(path)));
-                    self.create_input.clear();
-                    self.cursor_pos = 0;
-                    self.mode = Mode::LabelNewCompanion;
-                }
+            ListItem::TreeRepo { name, path, slots, .. } => {
+                let target_slot = slots.iter().position(|s| s.is_some()).unwrap_or(0);
+                self.attach_or_create_slot(&name, &path, &slots, target_slot);
             }
             ListItem::TreeDir { path, folded, .. } => {
                 self.toggle_fold_dir(&path, !folded);
@@ -866,206 +837,45 @@ impl App {
         self.action = Action::Create(name, Some(PathBuf::from(home)));
     }
 
-    fn next_companion_name(base: &str, all_sessions: &[Session]) -> Option<String> {
-        for n in 2..=9 {
-            let candidate = format!("{base}-{n}");
-            if !all_sessions.iter().any(|s| s.name == candidate) {
-                return Some(candidate);
-            }
-        }
-        None
-    }
-
-    fn companion_base_name(name: &str) -> &str {
-        for n in (2..=9).rev() {
-            let suffix_len = if n >= 10 { 3 } else { 2 };
-            if name.len() > suffix_len {
-                let (base, tail) = name.split_at(name.len() - suffix_len);
-                if tail == format!("-{n}") {
-                    return base;
-                }
-            }
-        }
-        name
-    }
-
-    pub fn duplicate_session(&mut self) {
-        let item = match self.selected_display_item() {
-            Some(item) => item.clone(),
-            None => return,
-        };
-        match item {
-            ListItem::TreeRepo { name, path, .. } => {
-                if let Some(dup_name) = Self::next_companion_name(&name, &self.all_sessions) {
-                    self.pending_create = Some((dup_name, Some(path)));
-                    self.create_input.clear();
-                    self.cursor_pos = 0;
-                    self.mode = Mode::LabelNewCompanion;
-                }
-            }
-            ListItem::SessionItem(session) => {
-                let base = Self::companion_base_name(&session.name).to_string();
-                if let Some(dup_name) = Self::next_companion_name(&base, &self.all_sessions) {
-                    if let Some(cwd) = screen::get_session_cwd(&session.pid_name) {
-                        self.pending_create = Some((dup_name, Some(cwd)));
-                        self.create_input.clear();
-                        self.cursor_pos = 0;
-                        self.mode = Mode::LabelNewCompanion;
-                    } else {
-                        self.set_status("Could not determine session directory".to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pub fn confirm_label_new_companion(&mut self) {
-        let label = self.create_input.trim().to_string();
-        if label.is_empty() {
-            self.set_status("Name required".to_string());
-            return;
-        }
-        if let Some((name, dir)) = self.pending_create.take() {
-            self.companion_labels.insert(name.clone(), label);
-            save_companion_labels(&self.companion_labels);
-            self.record_opened(&name);
-            let base = Self::companion_base_name(&name).to_string();
-            let pos = Self::companion_index(&name);
-            self.repo_active_idx.insert(base, pos);
-            self.action = Action::Create(name, dir);
-        }
-        self.create_input.clear();
-        self.cursor_pos = 0;
-        self.mode = Mode::Normal;
-    }
-
-    pub fn cancel_label_new_companion(&mut self) {
-        self.pending_create = None;
-        self.create_input.clear();
-        self.cursor_pos = 0;
-        self.mode = Mode::Normal;
-    }
-
-    /// For a session name like "repo-3", returns 2 (0-indexed pill). Base returns 0.
-    fn companion_index(name: &str) -> usize {
-        for n in 2..=9 {
-            let suffix = format!("-{n}");
-            if name.ends_with(&suffix) {
-                return n - 1;
-            }
-        }
-        0
-    }
-
-    pub fn start_label_edit(&mut self) {
-        let item = match self.selected_display_item() {
-            Some(i) => i.clone(),
-            None => return,
-        };
-        let pill_name = match item {
-            ListItem::TreeRepo { pills, active_idx, .. } => {
-                pills.get(active_idx).map(|s| s.name.clone())
-            }
-            ListItem::SessionItem(s) => Some(s.name.clone()),
-            _ => None,
-        };
-        if let Some(name) = pill_name {
-            self.create_input = self.companion_labels.get(&name).cloned().unwrap_or_default();
-            self.cursor_pos = self.create_input.chars().count();
-            self.editing_label_target = Some(name);
-            self.mode = Mode::EditingLabel;
-        }
-    }
-
-    pub fn confirm_label_edit(&mut self) {
-        if let Some(name) = self.editing_label_target.take() {
-            let label = self.create_input.trim().to_string();
-            if label.is_empty() {
-                self.companion_labels.remove(&name);
-            } else {
-                self.companion_labels.insert(name, label);
-            }
-            save_companion_labels(&self.companion_labels);
-        }
-        self.create_input.clear();
-        self.cursor_pos = 0;
-        self.mode = Mode::Normal;
-    }
-
-    pub fn cancel_label_edit(&mut self) {
-        self.editing_label_target = None;
-        self.create_input.clear();
-        self.cursor_pos = 0;
-        self.mode = Mode::Normal;
-    }
-
-    pub fn cycle_companion(&mut self, forward: bool) {
-        let item = match self.selected_display_item() {
-            Some(i) => i.clone(),
-            None => return,
-        };
-        let ListItem::TreeRepo { name, path, pills, active_idx, .. } = item else {
-            return;
-        };
-        if pills.is_empty() {
-            self.record_opened(&name);
-            self.action = Action::Create(name, Some(path));
-            return;
-        }
-
-        if forward {
-            if active_idx + 1 < pills.len() {
-                let new_idx = active_idx + 1;
-                self.repo_active_idx.insert(name.clone(), new_idx);
-                let sess = &pills[new_idx];
-                self.record_opened(&sess.name);
-                self.action = Action::Attach(sess.pid_name.clone());
-            } else if let Some(dup_name) = Self::next_companion_name(&name, &self.all_sessions) {
-                let new_idx = Self::companion_index(&dup_name);
-                self.repo_active_idx.insert(name.clone(), new_idx);
-                self.record_opened(&dup_name);
-                self.action = Action::Create(dup_name, Some(path));
-            } else {
-                self.repo_active_idx.insert(name.clone(), 0);
-                let sess = &pills[0];
-                self.record_opened(&sess.name);
-                self.action = Action::Attach(sess.pid_name.clone());
-            }
+    /// Returns the screen session name for a given (repo, slot) pair.
+    /// Slot 0 → `<repo>`, slot 1 → `<repo>-2`, slot 2 → `<repo>-3`, slot 3 → `<repo>-4`.
+    pub fn slot_session_name(repo: &str, slot: usize) -> String {
+        if slot == 0 {
+            repo.to_string()
         } else {
-            let new_idx = if active_idx == 0 {
-                pills.len() - 1
-            } else {
-                active_idx - 1
-            };
-            self.repo_active_idx.insert(name.clone(), new_idx);
-            let sess = &pills[new_idx];
-            self.record_opened(&sess.name);
-            self.action = Action::Attach(sess.pid_name.clone());
+            format!("{}-{}", repo, slot + 1)
         }
     }
 
-    /// Move active pill left/right without opening — pure navigation.
-    pub fn shift_pill(&mut self, forward: bool) {
+    fn attach_or_create_slot(
+        &mut self,
+        repo: &str,
+        path: &PathBuf,
+        slots: &[Option<Session>; SLOT_COUNT],
+        slot_idx: usize,
+    ) {
+        if let Some(session) = slots.get(slot_idx).and_then(|s| s.as_ref()) {
+            self.record_opened(&session.name);
+            self.action = Action::Attach(session.pid_name.clone());
+        } else {
+            let name = Self::slot_session_name(repo, slot_idx);
+            self.record_opened(&name);
+            self.action = Action::Create(name, Some(path.clone()));
+        }
+    }
+
+    /// Jump to slot N (0-indexed) of the currently selected repo.
+    pub fn select_slot(&mut self, slot_idx: usize) {
+        if slot_idx >= SLOT_COUNT {
+            return;
+        }
         let item = match self.selected_display_item() {
             Some(i) => i.clone(),
             None => return,
         };
-        let ListItem::TreeRepo { name, pills, active_idx, .. } = item else {
-            return;
-        };
-        if pills.len() <= 1 {
-            return;
+        if let ListItem::TreeRepo { name, path, slots, .. } = item {
+            self.attach_or_create_slot(&name, &path, &slots, slot_idx);
         }
-        let new_idx = if forward {
-            (active_idx + 1) % pills.len()
-        } else if active_idx == 0 {
-            pills.len() - 1
-        } else {
-            active_idx - 1
-        };
-        self.repo_active_idx.insert(name, new_idx);
-        self.rebuild_display_list();
     }
 
     pub fn toggle_fold_dir(&mut self, path: &PathBuf, fold: bool) {
@@ -1123,10 +933,6 @@ impl App {
         }
     }
 
-    pub fn on_tree_dir(&self) -> bool {
-        matches!(self.selected_display_item(), Some(ListItem::TreeDir { .. }))
-    }
-
     pub fn start_ordering(&mut self) {
         if let Some(ref tree) = self.workspace_tree {
             let dirs: Vec<String> = tree.children.iter()
@@ -1174,25 +980,6 @@ impl App {
 
     pub fn cancel_constant_ordering(&mut self) {
         self.mode = Mode::Normal;
-    }
-
-    pub fn select_constant(&mut self, n: usize) {
-        if n == 0 || n > self.constants.len() {
-            return;
-        }
-        let target_name = &self.constants[n - 1];
-        for (sel_idx, &disp_idx) in self.selectable_indices.iter().enumerate() {
-            let name = match self.display_items.get(disp_idx) {
-                Some(ListItem::TreeRepo { name, .. }) => name,
-                Some(ListItem::SessionItem(s)) => &s.name,
-                _ => continue,
-            };
-            if name == target_name {
-                self.selected = sel_idx;
-                self.select_for_attach();
-                return;
-            }
-        }
     }
 
     pub fn constant_command(&self, session_name: &str) -> Option<&str> {
@@ -1259,9 +1046,11 @@ impl App {
             Some(ListItem::SessionItem(session)) => {
                 Some((session.name.clone(), session.pid_name.clone()))
             }
-            Some(ListItem::TreeRepo { pills, active_idx, .. }) if !pills.is_empty() => {
-                let s = &pills[(*active_idx).min(pills.len() - 1)];
-                Some((s.name.clone(), s.pid_name.clone()))
+            Some(ListItem::TreeRepo { slots, .. }) => {
+                slots.iter()
+                    .filter_map(|s| s.as_ref())
+                    .next()
+                    .map(|s| (s.name.clone(), s.pid_name.clone()))
             }
             _ => None,
         };
@@ -1410,27 +1199,18 @@ fn flatten_tree(
         (node, String::new())
     };
 
-    for child in iter_node.children.iter() {
+    let mut sorted_children: Vec<&TreeNode> = iter_node.children.iter().collect();
+    sorted_children.sort_by_key(|c| if repo_has_open_slot(c, session_map) { 0 } else { 1 });
+
+    for child in sorted_children {
         if child.is_repo {
-            let mut pills: Vec<Session> = Vec::new();
-            if let Some(s) = session_map.get(child.name.as_str()).cloned().cloned() {
-                merged.insert(s.name.clone());
-                pills.push(s);
-            }
-            for n in 2..=9 {
-                let cname = format!("{}-{}", child.name, n);
-                if let Some(cs) = session_map.get(cname.as_str()).cloned().cloned() {
-                    merged.insert(cname);
-                    pills.push(cs);
-                }
-            }
+            let slots = collect_slots(&child.name, session_map, merged);
 
             let idx = display_items.len();
             display_items.push(ListItem::TreeRepo {
                 name: child.name.clone(),
                 path: child.path.clone(),
-                pills,
-                active_idx: 0,
+                slots,
                 prefix: " ".to_string(),
             });
             selectable_indices.push(idx);
@@ -1461,6 +1241,35 @@ fn flatten_tree(
             }
         }
     }
+}
+
+fn repo_has_open_slot(
+    node: &TreeNode,
+    session_map: &std::collections::HashMap<&str, &Session>,
+) -> bool {
+    if !node.is_repo {
+        return false;
+    }
+    (0..SLOT_COUNT).any(|slot| {
+        let name = App::slot_session_name(&node.name, slot);
+        session_map.contains_key(name.as_str())
+    })
+}
+
+fn collect_slots(
+    repo: &str,
+    session_map: &std::collections::HashMap<&str, &Session>,
+    merged: &mut std::collections::HashSet<String>,
+) -> [Option<Session>; SLOT_COUNT] {
+    let mut slots: [Option<Session>; SLOT_COUNT] = Default::default();
+    for slot in 0..SLOT_COUNT {
+        let name = App::slot_session_name(repo, slot);
+        if let Some(s) = session_map.get(name.as_str()).cloned().cloned() {
+            merged.insert(name);
+            slots[slot] = Some(s);
+        }
+    }
+    slots
 }
 
 fn count_repos(
@@ -1537,25 +1346,13 @@ fn flatten_filtered(
 
     for child in visible_children.iter() {
         if child.is_repo {
-            let mut pills: Vec<Session> = Vec::new();
-            if let Some(s) = session_map.get(child.name.as_str()).cloned().cloned() {
-                merged.insert(s.name.clone());
-                pills.push(s);
-            }
-            for n in 2..=9 {
-                let cname = format!("{}-{}", child.name, n);
-                if let Some(cs) = session_map.get(cname.as_str()).cloned().cloned() {
-                    merged.insert(cname);
-                    pills.push(cs);
-                }
-            }
+            let slots = collect_slots(&child.name, session_map, merged);
 
             let idx = display_items.len();
             display_items.push(ListItem::TreeRepo {
                 name: child.name.clone(),
                 path: child.path.clone(),
-                pills,
-                active_idx: 0,
+                slots,
                 prefix: " ".to_string(),
             });
             selectable_indices.push(idx);
@@ -1761,7 +1558,7 @@ fn save_sessions(all_sessions: &[Session], workspace_tree: &Option<TreeNode>) {
 
     let mut lines: Vec<String> = all_sessions
         .iter()
-        .filter(|s| !(2..=9).any(|n| s.name.ends_with(&format!("-{n}"))))
+        .filter(|s| !(2..=SLOT_COUNT + 1).any(|n| s.name.ends_with(&format!("-{n}"))))
         .filter(|s| !s.name.starts_with("tty") && !s.name.starts_with("pts"))
         .filter(|s| !s.name.starts_with("tmp-"))
         .map(|s| {
@@ -1813,39 +1610,6 @@ fn save_dir_order(order: &[String]) {
     let path = dir_order_path();
     let _ = std::fs::create_dir_all(path.parent().unwrap());
     let _ = std::fs::write(&path, order.join("\n") + "\n");
-}
-
-fn companion_labels_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config").join("scrn").join("companion_labels")
-}
-
-fn load_companion_labels() -> HashMap<String, String> {
-    let path = companion_labels_path();
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return HashMap::new(),
-    };
-    contents
-        .lines()
-        .filter_map(|l| {
-            let (name, label) = l.split_once('\t')?;
-            if name.is_empty() || label.is_empty() { return None; }
-            Some((name.to_string(), label.to_string()))
-        })
-        .collect()
-}
-
-fn save_companion_labels(labels: &HashMap<String, String>) {
-    let path = companion_labels_path();
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
-    let mut lines: Vec<String> = labels
-        .iter()
-        .map(|(name, label)| format!("{name}\t{label}"))
-        .collect();
-    lines.sort();
-    let content = if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" };
-    let _ = std::fs::write(&path, content);
 }
 
 fn folded_dirs_path() -> PathBuf {

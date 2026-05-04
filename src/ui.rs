@@ -9,77 +9,45 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{fuzzy_match, App, ListItem, Mode};
+use crate::app::{fuzzy_match, App, ListItem, Mode, SLOT_COUNT};
 use crate::screen::Session;
 
+const SLOT_GLYPHS: [&str; SLOT_COUNT] = [
+    "\u{f121}", // nf-fa-code (code </>)
+    "\u{f17b}", // nf-fa-android (agent)
+    "\u{f135}", // nf-fa-rocket (deploy)
+    "\u{f120}", // nf-fa-terminal (scratch >_)
+];
 
-fn pill_label(session_name: &str, labels: &HashMap<String, String>) -> String {
-    if let Some(l) = labels.get(session_name) {
-        return l.clone();
-    }
-    for n in 2..=9 {
-        if session_name.ends_with(&format!("-{n}")) {
-            return n.to_string();
-        }
-    }
-    "1".to_string()
+const SLOT_CELL_WIDTH: usize = 2;
+const SLOT_STRIP_WIDTH: u16 = (SLOT_CELL_WIDTH * SLOT_COUNT) as u16;
+pub const ROW_HEIGHT: u16 = 1;
+
+fn centered_cell<'a>(line: Line<'a>, _bg: Color) -> Cell<'a> {
+    Cell::from(line)
 }
 
-fn pills_display_width(pills: &[Session], labels: &HashMap<String, String>) -> usize {
-    if pills.is_empty() {
-        return 0;
-    }
-    let mut w = 0;
-    for (i, p) in pills.iter().enumerate() {
-        let lbl = pill_label(&p.name, labels);
-        // "[label]" — two brackets + label.
-        w += 2 + lbl.chars().count();
-        if i + 1 < pills.len() {
-            w += 1;
-        }
-    }
-    w
-}
-
-
-/// Render pills as `[N]` text. Only the row under the cursor shows its active
-/// pill in GREEN; everything else is a dim outline. No bg fill anywhere —
-/// this keeps the table reading as a single grid rather than a collage.
-/// Pill = `[label]`. Brackets turn green when the pill's session has a
-/// foreground process running; otherwise they stay dim. The label color
-/// signals selection (green+bold under the cursor, dim elsewhere). This
-/// gives four distinct visual states in the same 2+label width.
-fn build_pill_spans(
-    pills: &[Session],
-    active_idx: usize,
-    labels: &HashMap<String, String>,
-    has_proc: &[bool],
+fn build_slot_spans(
+    slots: &[Option<Session>; SLOT_COUNT],
+    has_proc: &[bool; SLOT_COUNT],
     row_bg: Color,
-    row_is_selected: bool,
 ) -> Vec<Span<'static>> {
-    let mut out: Vec<Span<'static>> = Vec::new();
-    if pills.is_empty() {
-        return out;
-    }
-    for (i, p) in pills.iter().enumerate() {
-        if i > 0 {
-            out.push(Span::styled(" ".to_string(), Style::default().bg(row_bg)));
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(SLOT_COUNT * 2);
+    for slot in 0..SLOT_COUNT {
+        let glyph = SLOT_GLYPHS[slot];
+        let occupied = slots[slot].is_some();
+        let running = has_proc[slot];
+        let fg = if occupied {
+            if running { GREEN } else { SLOT_IDLE }
+        } else {
+            SLOT_EMPTY
+        };
+        let mut style = Style::default().fg(fg).bg(row_bg);
+        if occupied {
+            style = style.add_modifier(Modifier::BOLD);
         }
-        let lbl = pill_label(&p.name, labels);
-        let is_active = row_is_selected && i == active_idx;
-        let running = *has_proc.get(i).unwrap_or(&false);
-        let label_fg = if is_active { GREEN } else { DIM };
-        let bracket_fg = if running { GREEN } else { DIM };
-        let mut label_mod = Modifier::empty();
-        if is_active {
-            label_mod |= Modifier::BOLD;
-        }
-        let bracket_style = Style::default().fg(bracket_fg).bg(row_bg);
-        let label_style = Style::default().fg(label_fg).bg(row_bg).add_modifier(label_mod);
-
-        out.push(Span::styled("[".to_string(), bracket_style));
-        out.push(Span::styled(lbl, label_style));
-        out.push(Span::styled("]".to_string(), bracket_style));
+        out.push(Span::styled(glyph.to_string(), style));
+        out.push(Span::styled(" ".to_string(), Style::default().bg(row_bg)));
     }
     out
 }
@@ -116,6 +84,8 @@ const PIN_BG: Color = Color::Rgb(22, 20, 30);
 const PIN_ZEBRA_BG: Color = Color::Rgb(33, 30, 46);
 const REPO_FG: Color = Color::Rgb(180, 180, 200);
 const TREE_GUIDE: Color = Color::Rgb(55, 55, 75);
+const SLOT_EMPTY: Color = Color::Rgb(55, 55, 70);
+const SLOT_IDLE: Color = Color::Rgb(150, 150, 170);
 
 fn split_at_char_pos(s: &str, pos: usize) -> (&str, &str) {
     let byte_pos = s
@@ -168,17 +138,13 @@ fn visible_input(input: &str, cursor_pos: usize, max_chars: usize) -> String {
 /// marker / throwaway marker / companion arrow). Must stay in sync with the
 /// renderer below.
 fn session_prefix_width(session: &crate::screen::Session, app: &App) -> usize {
-    let const_idx = app.constants.iter().position(|n| n == &session.name);
-    if const_idx.filter(|&i| i < 9).is_some() {
+    if app.is_current_session(session) {
         return 2;
     }
-    if app.is_current_session(session) {
-        return 2; // ◆ + space
-    }
     if session.name.starts_with("tmp-") {
-        return 2; // ~ + space
+        return 2;
     }
-    let is_companion = (2..=9).any(|n| session.name.ends_with(&format!("-{n}")));
+    let is_companion = (2..=SLOT_COUNT + 1).any(|n| session.name.ends_with(&format!("-{n}")));
     if is_companion {
         return 5;
     }
@@ -272,14 +238,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             dim_background(f);
             draw_command_modal(f, app);
         }
-        Mode::EditingLabel => {
-            dim_background(f);
-            draw_label_modal(f, app, false);
-        }
-        Mode::LabelNewCompanion => {
-            dim_background(f);
-            draw_label_modal(f, app, true);
-        }
         _ => {}
     }
 
@@ -334,17 +292,8 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         max as u16
     };
 
-    // Tabs column: widest pill-strip across TreeRepo rows.
-    let tabs_w = {
-        let mut max = 0usize;
-        for item in &app.display_items {
-            if let ListItem::TreeRepo { pills, .. } = item {
-                let w = pills_display_width(pills, &app.companion_labels);
-                if w > max { max = w; }
-            }
-        }
-        (max as u16).max(1)
-    };
+    // Slots column is a fixed-width strip of icons, identical on every row.
+    let tabs_w = SLOT_STRIP_WIDTH;
 
     let fixed_base = (COL_SPACING * 2) + BORDERS;
     let available = area.width.saturating_sub(fixed_base);
@@ -358,7 +307,6 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let name_chars = name_w as usize;
-    let name_align_width = (max_name_chars as usize).min(name_chars);
 
     let header_style = Style::default()
         .fg(HEADER_FG)
@@ -367,7 +315,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let header_cells = vec![
         Cell::from("Name"),
-        Cell::from("Tabs"),
+        Cell::from(""),
     ];
     let header = Row::new(header_cells)
     .style(header_style)
@@ -460,20 +408,19 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     }
                 }
                 let cells = vec![
-                    Cell::from(Line::from(spans)),
-                    Cell::from(Span::styled("", Style::default().bg(bg))),
+                    centered_cell(Line::from(spans), bg),
+                    centered_cell(Line::from(Span::styled("", Style::default().bg(bg))), bg),
                 ];
-                Row::new(cells).style(Style::default().fg(SECTION_FG).bg(bg))
+                Row::new(cells).height(ROW_HEIGHT).style(Style::default().fg(SECTION_FG).bg(bg))
             }
             ListItem::TreeRepo {
                 name,
-                pills,
-                active_idx,
+                slots,
                 prefix,
                 ..
             } => {
-                let const_idx = app.constants.iter().position(|n| n == name);
-                let base_bg = if const_idx.is_some() {
+                let is_constant = app.constants.iter().any(|n| n == name);
+                let base_bg = if is_constant {
                     if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
                 } else if app.pins.contains(name) {
                     if selectable_row_idx % 2 == 1 { PIN_ZEBRA_BG } else { PIN_BG }
@@ -481,20 +428,16 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 let bg = if is_selected { HIGHLIGHT_BG } else { base_bg };
                 selectable_row_idx += 1;
 
-                let hotkey_prefix = const_idx
-                    .filter(|&i| i < 9)
-                    .map(|i| format!("{} ", i + 1))
-                    .unwrap_or_else(|| "  ".to_string());
-                let display_prefix = if const_idx.is_some() { "" } else { prefix.as_str() };
-                let used_prefix = hotkey_prefix.chars().count() + display_prefix.chars().count();
-                let has_session = !pills.is_empty();
+                let display_prefix = if is_constant { "" } else { prefix.as_str() };
+                let used_prefix = 2 + display_prefix.chars().count();
+                let has_session = slots.iter().any(|s| s.is_some());
                 let name_fg = if has_session { GREEN } else { REPO_FG };
 
                 let max_name_avail = name_chars.saturating_sub(used_prefix);
                 let name_text = truncate(name, max_name_avail);
 
                 let mut spans: Vec<Span> = Vec::new();
-                spans.push(Span::styled(hotkey_prefix.clone(), Style::default().fg(DIM).bg(bg)));
+                spans.push(Span::styled("  ".to_string(), Style::default().fg(DIM).bg(bg)));
                 spans.push(Span::styled(display_prefix, Style::default().fg(TREE_GUIDE).bg(bg)));
 
                 if !app.search_input.is_empty() {
@@ -529,48 +472,38 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
                 }
 
-                let _ = name_align_width;
-
-                let proc_flags: Vec<bool> = pills
-                    .iter()
-                    .map(|p| app.session_has_proc(&p.pid_name))
-                    .collect();
-                let tab_spans = build_pill_spans(pills, *active_idx, &app.companion_labels, &proc_flags, bg, is_selected);
+                let mut proc_flags: [bool; SLOT_COUNT] = [false; SLOT_COUNT];
+                for (i, slot) in slots.iter().enumerate() {
+                    if let Some(s) = slot {
+                        proc_flags[i] = app.session_has_proc(&s.pid_name);
+                    }
+                }
+                let tab_spans = build_slot_spans(slots, &proc_flags, bg);
 
                 let cells = vec![
-                    Cell::from(Line::from(spans)),
-                    Cell::from(Line::from(tab_spans)),
+                    centered_cell(Line::from(spans), bg),
+                    centered_cell(Line::from(tab_spans), bg),
                 ];
-                Row::new(cells).style(Style::default().fg(FG).bg(bg))
+                Row::new(cells).height(ROW_HEIGHT).style(Style::default().fg(FG).bg(bg))
             }
             ListItem::SessionItem(session) => {
                 let is_current = app.is_current_session(session);
                 let is_throwaway = session.name.starts_with("tmp-");
 
-                let const_idx = app.constants.iter().position(|n| n == &session.name);
-                let base_bg = if const_idx.is_some() {
+                let is_constant = app.constants.iter().any(|n| n == &session.name);
+                let base_bg = if is_constant {
                     if selectable_row_idx % 2 == 1 { CONST_ZEBRA_BG } else { CONST_BG }
                 } else if app.pins.contains(&session.name) {
                     if selectable_row_idx % 2 == 1 { PIN_ZEBRA_BG } else { PIN_BG }
                 } else if selectable_row_idx % 2 == 1 { ZEBRA_BG } else { BASE_BG };
                 let bg = if is_selected { HIGHLIGHT_BG } else { base_bg };
                 selectable_row_idx += 1;
-                let is_inactive_const = const_idx.is_some() && session.pid_name.is_empty();
-                let is_companion = !is_current && !is_throwaway && (2..=9).any(|n| session.name.ends_with(&format!("-{n}")));
+                let is_inactive_const = is_constant && session.pid_name.is_empty();
+                let is_companion = !is_current && !is_throwaway && (2..=SLOT_COUNT + 1).any(|n| session.name.ends_with(&format!("-{n}")));
                 let name_fg = if is_inactive_const { DIM } else if is_current { ACCENT } else if is_throwaway { DIM } else { GREEN };
-                let hotkey_prefix = const_idx
-                    .filter(|&i| i < 9)
-                    .map(|i| format!("{} ", i + 1));
-                let prefix = if let Some(ref hp) = hotkey_prefix {
-                    hp.as_str()
-                } else if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else if is_companion { "   \u{21b3} " } else { "  " };
+                let prefix = if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else if is_companion { "   \u{21b3} " } else { "  " };
                 let max_name_avail = name_chars.saturating_sub(prefix.chars().count());
-                // Prefer the user-facing label over the internal screen name.
-                let base_name = app
-                    .companion_labels
-                    .get(&session.name)
-                    .cloned()
-                    .unwrap_or_else(|| session.name.clone());
+                let base_name = session.name.clone();
                 let display_name = if name_counts.get(&session.name).copied().unwrap_or(0) > 1 {
                     let seen = name_seen.entry(session.name.clone()).or_insert(0);
                     *seen += 1;
@@ -624,10 +557,10 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 }
 
                 let cells = vec![
-                    Cell::from(Line::from(spans)),
-                    Cell::from(Span::styled("", Style::default().bg(bg))),
+                    centered_cell(Line::from(spans), bg),
+                    centered_cell(Line::from(Span::styled("", Style::default().bg(bg))), bg),
                 ];
-                Row::new(cells).style(Style::default().fg(FG).bg(bg))
+                Row::new(cells).height(ROW_HEIGHT).style(Style::default().fg(FG).bg(bg))
             }
         }
         })
@@ -672,9 +605,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         hints.push(("h/l","Fold"));
         hints.push(("z","FoldAll"));
     } else {
-        hints.push(("d","Dup+label"));
-        hints.push(("\u{2190}/\u{2192}","Pill"));
-        hints.push(("Tab","Cycle"));
+        hints.push(("1-4","Slot"));
         hints.push(("`","Back"));
     }
     hints.push(("/","Search"));
@@ -685,10 +616,6 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
     if on_constant {
         hints.push(("e", "Cmd"));
     }
-    if !on_dir {
-        hints.push(("L","Label"));
-    }
-    hints.push(("n","Rename"));
     if app.workspace_tree.as_ref().is_some_and(|t| t.children.iter().any(|c| !c.is_repo)) {
         hints.push(("O", "Order"));
     }
@@ -762,7 +689,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
             );
 
         // borders(2) + header(1) + header bottom_margin(1) = 4
-        let visible_rows = area.height.saturating_sub(4) as usize;
+        let visible_rows = (area.height.saturating_sub(4) / ROW_HEIGHT) as usize;
 
         let mut state = TableState::default();
         if let Some(sel_row) = selected_visual_row {
@@ -1317,52 +1244,3 @@ fn draw_constant_ordering_modal(f: &mut Frame, app: &App) {
 
 
 
-fn draw_label_modal(f: &mut Frame, app: &App, creating: bool) {
-    let title = if creating { " Name new companion " } else { " Rename " };
-    let hint_line_top = if creating {
-        " Label this companion (optional):"
-    } else {
-        " Label:"
-    };
-
-    let area = f.area();
-    let width = 60u16.min(area.width.saturating_sub(4));
-    let height = 5u16;
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let modal_area = Rect::new(x, y, width, height);
-
-    f.render_widget(Clear, modal_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(MODAL_BORDER).bg(MODAL_BG))
-        .style(Style::default().fg(FG).bg(MODAL_BG))
-        .title(Span::styled(
-            title,
-            Style::default().fg(MODAL_TITLE).bg(MODAL_BG).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            " Enter save  Esc cancel  Backspace clear ",
-            Style::default().fg(DIM).bg(MODAL_BG),
-        ));
-
-    let inner = block.inner(modal_area);
-    f.render_widget(block, modal_area);
-
-    let max_chars = inner.width.saturating_sub(2) as usize;
-    let display = visible_input(&app.create_input, app.cursor_pos, max_chars);
-
-    let lines = vec![
-        Line::from(Span::styled(hint_line_top, Style::default().fg(DIM).bg(MODAL_BG))),
-        Line::from(Span::styled(
-            format!(" {display}"),
-            Style::default().fg(FG_BRIGHT).bg(MODAL_BG).add_modifier(Modifier::BOLD),
-        )),
-    ];
-
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(FG).bg(MODAL_BG)),
-        inner,
-    );
-}
