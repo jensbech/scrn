@@ -9,48 +9,9 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{fuzzy_match, App, ListItem, Mode, SLOT_COUNT};
-use crate::screen::Session;
+use crate::app::{fuzzy_match, App, ListItem, Mode};
 
-const SLOT_GLYPHS: [&str; SLOT_COUNT] = [
-    "\u{f121}", // nf-fa-code (code </>)
-    "\u{f17b}", // nf-fa-android (agent)
-    "\u{f135}", // nf-fa-rocket (deploy)
-    "\u{f120}", // nf-fa-terminal (scratch >_)
-];
-
-const SLOT_CELL_WIDTH: usize = 2;
-const SLOT_STRIP_WIDTH: u16 = (SLOT_CELL_WIDTH * SLOT_COUNT) as u16;
 pub const ROW_HEIGHT: u16 = 1;
-
-fn centered_cell<'a>(line: Line<'a>, _bg: Color) -> Cell<'a> {
-    Cell::from(line)
-}
-
-fn build_slot_spans(
-    slots: &[Option<Session>; SLOT_COUNT],
-    has_proc: &[bool; SLOT_COUNT],
-    row_bg: Color,
-) -> Vec<Span<'static>> {
-    let mut out: Vec<Span<'static>> = Vec::with_capacity(SLOT_COUNT * 2);
-    for slot in 0..SLOT_COUNT {
-        let glyph = SLOT_GLYPHS[slot];
-        let occupied = slots[slot].is_some();
-        let running = has_proc[slot];
-        let fg = if occupied {
-            if running { GREEN } else { SLOT_IDLE }
-        } else {
-            SLOT_EMPTY
-        };
-        let mut style = Style::default().fg(fg).bg(row_bg);
-        if occupied {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        out.push(Span::styled(glyph.to_string(), style));
-        out.push(Span::styled(" ".to_string(), Style::default().bg(row_bg)));
-    }
-    out
-}
 
 // ── Palette — ALL explicit Rgb, zero ANSI named colors ─────
 const BASE_BG: Color = Color::Rgb(18, 18, 24);
@@ -84,8 +45,6 @@ const PIN_BG: Color = Color::Rgb(22, 20, 30);
 const PIN_ZEBRA_BG: Color = Color::Rgb(33, 30, 46);
 const REPO_FG: Color = Color::Rgb(180, 180, 200);
 const TREE_GUIDE: Color = Color::Rgb(55, 55, 75);
-const SLOT_EMPTY: Color = Color::Rgb(55, 55, 70);
-const SLOT_IDLE: Color = Color::Rgb(150, 150, 170);
 
 fn split_at_char_pos(s: &str, pos: usize) -> (&str, &str) {
     let byte_pos = s
@@ -143,10 +102,6 @@ fn session_prefix_width(session: &crate::screen::Session, app: &App) -> usize {
     }
     if session.name.starts_with("tmp-") {
         return 2;
-    }
-    let is_companion = (2..=SLOT_COUNT + 1).any(|n| session.name.ends_with(&format!("-{n}")));
-    if is_companion {
-        return 5;
     }
     2
 }
@@ -292,20 +247,9 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         max as u16
     };
 
-    // Slots column is a fixed-width strip of icons, identical on every row.
-    let tabs_w = SLOT_STRIP_WIDTH;
-
-    let fixed_base = (COL_SPACING * 2) + BORDERS;
+    let fixed_base = COL_SPACING + BORDERS;
     let available = area.width.saturating_sub(fixed_base);
-
-    let want = max_name_chars + tabs_w;
-    let (name_w, tabs_col_w) = if want <= available {
-        (max_name_chars, tabs_w)
-    } else {
-        let nw = available.saturating_sub(tabs_w).max(MIN_NAME_W);
-        (nw, tabs_w)
-    };
-
+    let name_w = max_name_chars.min(available).max(MIN_NAME_W);
     let name_chars = name_w as usize;
 
     let header_style = Style::default()
@@ -313,10 +257,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         .bg(BASE_BG)
         .add_modifier(Modifier::BOLD);
 
-    let header_cells = vec![
-        Cell::from("Name"),
-        Cell::from(""),
-    ];
+    let header_cells = vec![Cell::from("Name")];
     let header = Row::new(header_cells)
     .style(header_style)
     .bottom_margin(1);
@@ -352,20 +293,18 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                             .bg(BASE_BG)
                             .add_modifier(Modifier::BOLD | Modifier::DIM),
                     ))),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                 ];
                 Row::new(cells).style(Style::default().fg(SECTION_FG).bg(BASE_BG))
             }
             ListItem::Separator => {
                 let line_char = "\u{2500}";
-                let total_w = (name_w + tabs_col_w + COL_SPACING) as usize;
+                let total_w = name_w as usize;
                 let line_str: String = line_char.repeat(total_w);
                 let cells = vec![
                     Cell::from(Span::styled(
                         line_str,
                         Style::default().fg(BORDER_FG).bg(BASE_BG),
                     )),
-                    Cell::from(Span::styled("", Style::default().bg(BASE_BG))),
                 ];
                 Row::new(cells)
                     .style(Style::default().fg(BORDER_FG).bg(BASE_BG))
@@ -407,15 +346,12 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                         ));
                     }
                 }
-                let cells = vec![
-                    centered_cell(Line::from(spans), bg),
-                    centered_cell(Line::from(Span::styled("", Style::default().bg(bg))), bg),
-                ];
+                let cells = vec![Cell::from(Line::from(spans))];
                 Row::new(cells).height(ROW_HEIGHT).style(Style::default().fg(SECTION_FG).bg(bg))
             }
             ListItem::TreeRepo {
                 name,
-                slots,
+                session,
                 prefix,
                 ..
             } => {
@@ -430,7 +366,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
 
                 let display_prefix = if is_constant { "" } else { prefix.as_str() };
                 let used_prefix = 2 + display_prefix.chars().count();
-                let has_session = slots.iter().any(|s| s.is_some());
+                let has_session = session.is_some();
                 let name_fg = if has_session { GREEN } else { REPO_FG };
 
                 let max_name_avail = name_chars.saturating_sub(used_prefix);
@@ -472,18 +408,7 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
                 }
 
-                let mut proc_flags: [bool; SLOT_COUNT] = [false; SLOT_COUNT];
-                for (i, slot) in slots.iter().enumerate() {
-                    if let Some(s) = slot {
-                        proc_flags[i] = app.session_has_proc(&s.pid_name);
-                    }
-                }
-                let tab_spans = build_slot_spans(slots, &proc_flags, bg);
-
-                let cells = vec![
-                    centered_cell(Line::from(spans), bg),
-                    centered_cell(Line::from(tab_spans), bg),
-                ];
+                let cells = vec![Cell::from(Line::from(spans))];
                 Row::new(cells).height(ROW_HEIGHT).style(Style::default().fg(FG).bg(bg))
             }
             ListItem::SessionItem(session) => {
@@ -499,9 +424,8 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                 let bg = if is_selected { HIGHLIGHT_BG } else { base_bg };
                 selectable_row_idx += 1;
                 let is_inactive_const = is_constant && session.pid_name.is_empty();
-                let is_companion = !is_current && !is_throwaway && (2..=SLOT_COUNT + 1).any(|n| session.name.ends_with(&format!("-{n}")));
                 let name_fg = if is_inactive_const { DIM } else if is_current { ACCENT } else if is_throwaway { DIM } else { GREEN };
-                let prefix = if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else if is_companion { "   \u{21b3} " } else { "  " };
+                let prefix = if is_current { "\u{25c6} " } else if is_throwaway { "~ " } else { "  " };
                 let max_name_avail = name_chars.saturating_sub(prefix.chars().count());
                 let base_name = session.name.clone();
                 let display_name = if name_counts.get(&session.name).copied().unwrap_or(0) > 1 {
@@ -556,20 +480,14 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
                     spans.push(Span::styled(name_text, Style::default().fg(name_fg).bg(bg)));
                 }
 
-                let cells = vec![
-                    centered_cell(Line::from(spans), bg),
-                    centered_cell(Line::from(Span::styled("", Style::default().bg(bg))), bg),
-                ];
+                let cells = vec![Cell::from(Line::from(spans))];
                 Row::new(cells).height(ROW_HEIGHT).style(Style::default().fg(FG).bg(bg))
             }
         }
         })
         .collect();
 
-    let widths_vec = vec![
-        Constraint::Length(name_w),
-        Constraint::Length(tabs_col_w),
-    ];
+    let widths_vec = vec![Constraint::Length(name_w)];
 
     let mut block = Block::default()
         .borders(Borders::ALL)
@@ -605,7 +523,6 @@ fn draw_table(f: &mut Frame, app: &mut App, area: Rect) {
         hints.push(("h/l","Fold"));
         hints.push(("z","FoldAll"));
     } else {
-        hints.push(("1-4","Slot"));
         hints.push(("`","Back"));
     }
     hints.push(("/","Search"));

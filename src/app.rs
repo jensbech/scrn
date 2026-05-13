@@ -21,8 +21,6 @@ pub enum Mode {
     EditingCommand,
 }
 
-pub const SLOT_COUNT: usize = 4;
-
 pub enum Action {
     None,
     Attach(String),                   // pid.name
@@ -53,7 +51,7 @@ pub enum ListItem {
     TreeRepo {
         name: String,
         path: PathBuf,
-        slots: [Option<Session>; SLOT_COUNT],
+        session: Option<Session>,
         prefix: String,
     },
 }
@@ -195,15 +193,6 @@ impl App {
         }
         save_sessions(&self.all_sessions, &self.workspace_tree);
         self.apply_search_filter();
-    }
-
-    /// True iff the given session has a non-shell foreground process.
-    pub fn session_has_proc(&self, pid_name: &str) -> bool {
-        let pid: u32 = match pid_name.split('.').next().and_then(|s| s.parse().ok()) {
-            Some(p) => p,
-            None => return false,
-        };
-        self.session_has_proc.get(&pid).copied().unwrap_or(false)
     }
 
     pub fn restore_sessions(&mut self) {
@@ -702,8 +691,8 @@ impl App {
             let mut filtered_indices = Vec::new();
             for (i, item) in self.display_items.iter().enumerate() {
                 match item {
-                    ListItem::TreeRepo { name, slots, .. } => {
-                        if slots.iter().any(|s| s.is_some()) && history.contains_key(name.as_str()) {
+                    ListItem::TreeRepo { name, session, .. } => {
+                        if session.is_some() && history.contains_key(name.as_str()) {
                             filtered_indices.push(filtered_items.len());
                             filtered_items.push(item.clone());
                         }
@@ -791,9 +780,14 @@ impl App {
                     self.action = Action::Attach(session.pid_name);
                 }
             }
-            ListItem::TreeRepo { name, path, slots, .. } => {
-                let target_slot = slots.iter().position(|s| s.is_some()).unwrap_or(0);
-                self.attach_or_create_slot(&name, &path, &slots, target_slot);
+            ListItem::TreeRepo { name, path, session, .. } => {
+                if let Some(session) = session {
+                    self.record_opened(&session.name);
+                    self.action = Action::Attach(session.pid_name);
+                } else {
+                    self.record_opened(&name);
+                    self.action = Action::Create(name, Some(path));
+                }
             }
             ListItem::TreeDir { path, folded, .. } => {
                 self.toggle_fold_dir(&path, !folded);
@@ -837,46 +831,6 @@ impl App {
         self.action = Action::Create(name, Some(PathBuf::from(home)));
     }
 
-    /// Returns the screen session name for a given (repo, slot) pair.
-    /// Slot 0 → `<repo>`, slot 1 → `<repo>-2`, slot 2 → `<repo>-3`, slot 3 → `<repo>-4`.
-    pub fn slot_session_name(repo: &str, slot: usize) -> String {
-        if slot == 0 {
-            repo.to_string()
-        } else {
-            format!("{}-{}", repo, slot + 1)
-        }
-    }
-
-    fn attach_or_create_slot(
-        &mut self,
-        repo: &str,
-        path: &PathBuf,
-        slots: &[Option<Session>; SLOT_COUNT],
-        slot_idx: usize,
-    ) {
-        if let Some(session) = slots.get(slot_idx).and_then(|s| s.as_ref()) {
-            self.record_opened(&session.name);
-            self.action = Action::Attach(session.pid_name.clone());
-        } else {
-            let name = Self::slot_session_name(repo, slot_idx);
-            self.record_opened(&name);
-            self.action = Action::Create(name, Some(path.clone()));
-        }
-    }
-
-    /// Jump to slot N (0-indexed) of the currently selected repo.
-    pub fn select_slot(&mut self, slot_idx: usize) {
-        if slot_idx >= SLOT_COUNT {
-            return;
-        }
-        let item = match self.selected_display_item() {
-            Some(i) => i.clone(),
-            None => return,
-        };
-        if let ListItem::TreeRepo { name, path, slots, .. } = item {
-            self.attach_or_create_slot(&name, &path, &slots, slot_idx);
-        }
-    }
 
     pub fn toggle_fold_dir(&mut self, path: &PathBuf, fold: bool) {
         let key = path.display().to_string();
@@ -1046,11 +1000,8 @@ impl App {
             Some(ListItem::SessionItem(session)) => {
                 Some((session.name.clone(), session.pid_name.clone()))
             }
-            Some(ListItem::TreeRepo { slots, .. }) => {
-                slots.iter()
-                    .filter_map(|s| s.as_ref())
-                    .next()
-                    .map(|s| (s.name.clone(), s.pid_name.clone()))
+            Some(ListItem::TreeRepo { session, .. }) => {
+                session.as_ref().map(|s| (s.name.clone(), s.pid_name.clone()))
             }
             _ => None,
         };
@@ -1200,17 +1151,20 @@ fn flatten_tree(
     };
 
     let mut sorted_children: Vec<&TreeNode> = iter_node.children.iter().collect();
-    sorted_children.sort_by_key(|c| if repo_has_open_slot(c, session_map) { 0 } else { 1 });
+    sorted_children.sort_by_key(|c| if repo_has_session(c, session_map) { 0 } else { 1 });
 
     for child in sorted_children {
         if child.is_repo {
-            let slots = collect_slots(&child.name, session_map, merged);
+            let session = session_map.get(child.name.as_str()).cloned().cloned();
+            if let Some(ref s) = session {
+                merged.insert(s.name.clone());
+            }
 
             let idx = display_items.len();
             display_items.push(ListItem::TreeRepo {
                 name: child.name.clone(),
                 path: child.path.clone(),
-                slots,
+                session,
                 prefix: " ".to_string(),
             });
             selectable_indices.push(idx);
@@ -1243,33 +1197,11 @@ fn flatten_tree(
     }
 }
 
-fn repo_has_open_slot(
+fn repo_has_session(
     node: &TreeNode,
     session_map: &std::collections::HashMap<&str, &Session>,
 ) -> bool {
-    if !node.is_repo {
-        return false;
-    }
-    (0..SLOT_COUNT).any(|slot| {
-        let name = App::slot_session_name(&node.name, slot);
-        session_map.contains_key(name.as_str())
-    })
-}
-
-fn collect_slots(
-    repo: &str,
-    session_map: &std::collections::HashMap<&str, &Session>,
-    merged: &mut std::collections::HashSet<String>,
-) -> [Option<Session>; SLOT_COUNT] {
-    let mut slots: [Option<Session>; SLOT_COUNT] = Default::default();
-    for slot in 0..SLOT_COUNT {
-        let name = App::slot_session_name(repo, slot);
-        if let Some(s) = session_map.get(name.as_str()).cloned().cloned() {
-            merged.insert(name);
-            slots[slot] = Some(s);
-        }
-    }
-    slots
+    node.is_repo && session_map.contains_key(node.name.as_str())
 }
 
 fn count_repos(
@@ -1346,13 +1278,16 @@ fn flatten_filtered(
 
     for child in visible_children.iter() {
         if child.is_repo {
-            let slots = collect_slots(&child.name, session_map, merged);
+            let session = session_map.get(child.name.as_str()).cloned().cloned();
+            if let Some(ref s) = session {
+                merged.insert(s.name.clone());
+            }
 
             let idx = display_items.len();
             display_items.push(ListItem::TreeRepo {
                 name: child.name.clone(),
                 path: child.path.clone(),
-                slots,
+                session,
                 prefix: " ".to_string(),
             });
             selectable_indices.push(idx);
@@ -1558,7 +1493,7 @@ fn save_sessions(all_sessions: &[Session], workspace_tree: &Option<TreeNode>) {
 
     let mut lines: Vec<String> = all_sessions
         .iter()
-        .filter(|s| !(2..=SLOT_COUNT + 1).any(|n| s.name.ends_with(&format!("-{n}"))))
+        .filter(|s| !(2..=9).any(|n| s.name.ends_with(&format!("-{n}"))))
         .filter(|s| !s.name.starts_with("tty") && !s.name.starts_with("pts"))
         .filter(|s| !s.name.starts_with("tmp-"))
         .map(|s| {

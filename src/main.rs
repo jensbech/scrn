@@ -335,7 +335,6 @@ fn run_picker(
                         KeyCode::Char('e') => app.start_command_edit(),
                         KeyCode::Char('O') => app.start_ordering(),
                         KeyCode::Char('R') => app.start_constant_ordering(),
-                        KeyCode::Char(ch @ '1'..='4') => app.select_slot(ch as usize - '1' as usize),
                         _ => {}
                     },
                     Mode::Searching => match key.code {
